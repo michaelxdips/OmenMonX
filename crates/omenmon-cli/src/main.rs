@@ -27,8 +27,20 @@ enum Command {
     Battery,
     /// Live status one-shot (temps + fan + battery summary)
     Status,
-    /// Power telemetry: live CPU package watts + static limit bytes
+    /// CPU power limits (0x2A block) and the writable window
     Power,
+    /// Set the CPU power cap in watts (verified 5..25 W, readback-checked)
+    Cap {
+        /// Watts to apply, 5..25
+        watts: u8,
+    },
+    /// Show the firmware fan curve (42 points, read-only)
+    Curve,
+    /// Thermal mode: show current, or set balanced | performance | cool
+    Thermal {
+        /// balanced | performance | cool
+        mode: Option<String>,
+    },
     /// Keyboard color table: show, or set one zone's RGB
     Kbd {
         /// Show the color table, or a zone number 0..3 to set
@@ -50,6 +62,9 @@ fn main() -> anyhow::Result<()> {
         Command::Battery => battery()?,
         Command::Status => status()?,
         Command::Power => power()?,
+        Command::Cap { watts } => power_cap(watts)?,
+        Command::Curve => fan_curve()?,
+        Command::Thermal { mode } => thermal(mode.as_deref())?,
         Command::Kbd { zone, color } => kbd(zone, color.as_deref())?,
         Command::Daemon => daemon::run()?,
     }
@@ -163,24 +178,126 @@ fn status() -> anyhow::Result<()> {
 fn power() -> anyhow::Result<()> {
     use hp_wmi::payload::{Request, CMD_DEFAULT};
     let b = bios()?;
-    println!("omenmon power — live telemetry (verified 2026-10-21)");
-    println!("{}", "=".repeat(50));
-    // 0x2A byte0 = live CPU package watts (moves under load, 5 Hz verified);
-    // bytes 3/4 = static limit candidates; EC C6/C7/C8 = static limits.
-    match b.raw_send(Request::with_data(CMD_DEFAULT, 0x2A, &[]), 128) {
-        Ok(r) if r.is_ok() => {
-            let watts = r.data.first().copied().unwrap_or(0);
-            println!("CPU package:    {watts:>3} W  (live)");
-            if r.data.len() > 4 {
-                println!("limit bytes:    0x{:02X} 0x{:02X} (static, unconfirmed meaning)", r.data[3], r.data[4]);
-            }
-        }
-        Ok(r) => anyhow::bail!("BIOS returned rwret={}", r.return_code),
+    println!("omenmon power - CPU power limits (verified 2026-10-21)");
+    println!("{}", "=".repeat(52));
+
+    // 0x2A is a LIMITS block, not live power. Measured: under a 16-thread load
+    // byte 0 went 64 -> 62, i.e. it fell. It must not be shown as watts.
+    let limits = match b.get_cpu_power() {
+        Ok(l) if l.is_plausible() => l,
+        Ok(_) => anyhow::bail!("0x2A returned no plausible limits"),
         Err(e) => anyhow::bail!("{e} (elevated run required)"),
-    }
+    };
+    println!("PL1 (long):     {:>3} W", limits.pl1);
+    println!("PL2 (short):    {:>3} W", limits.pl2);
+    println!("PL4 (peak):     {:>3} W", limits.pl4);
+    println!("With GPU:       {:>3} W", limits.pl_with_gpu);
+    println!(
+        "Writable range: {}..{} W  (firmware clamps above {})",
+        hp_wmi::CpuPowerLimits::MIN_WATTS,
+        hp_wmi::CpuPowerLimits::MAX_WATTS,
+        hp_wmi::CpuPowerLimits::MAX_WATTS
+    );
+
     if let Ok(io) = hp_ec::ecio::EcIo::connect() {
         if let Ok(page) = io.with_lock(2000, |io| hp_ec::eram::Eram::new(io).read_range(0xC6, 3)) {
-            println!("EC limits:      0xC6={} 0xC7={} 0xC8={} (static)", page[0], page[1], page[2]);
+            println!("\nEC 0xC6..C8:    {} {} {}  (static)", page[0], page[1], page[2]);
+        }
+    }
+    println!("\nNote: 0x2A is a settings block. It is NOT instantaneous package power.");
+    Ok(())
+}
+
+/// Set the CPU power cap. Clamped to the verified 5..25 W window.
+fn power_cap(watts: u8) -> anyhow::Result<()> {
+    let b = bios()?;
+    let applied = b.set_power_limit(watts)?;
+    if applied != watts {
+        println!(
+            "requested {watts} W -> clamped to {applied} W (board accepts {}..{} W)",
+            hp_wmi::CpuPowerLimits::MIN_WATTS,
+            hp_wmi::CpuPowerLimits::MAX_WATTS
+        );
+    }
+    // Verify by readback: the firmware is the authority, not our request.
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let after = b.get_cpu_power()?;
+    println!("applied: PL1={} PL2={} PL4={} W", after.pl1, after.pl2, after.pl4);
+    if after.pl1 != applied {
+        anyhow::bail!(
+            "firmware did not accept {applied} W (reads back as {} W)",
+            after.pl1
+        );
+    }
+    println!("verified by readback.");
+    Ok(())
+}
+
+/// Show the firmware fan curve.
+fn fan_curve() -> anyhow::Result<()> {
+    let b = bios()?;
+    let t = b.get_fan_table_parsed()?;
+    println!(
+        "fan curve: {} fans, {} points (read-only - 0x2E and 0x32 are no-ops here)",
+        t.fan_count, t.level_count
+    );
+    println!("{}", "=".repeat(52));
+    print!("{:>3} {:>6}", "pt", "level");
+    for f in 0..t.fan_count {
+        print!(" {:>7}", format!("fan{} %", f + 1));
+    }
+    println!();
+    for (i, p) in t.points.iter().enumerate() {
+        print!("{:>3} {:>6}", i, p.level);
+        for f in 0..t.fan_count as usize {
+            match p.duty(f, t.fan_count) {
+                Some(d) => print!(" {d:>7}"),
+                None => print!(" {:>7}", "-"),
+            }
+        }
+        println!();
+    }
+    println!(
+        "\npeak duty {}%   monotonic: {}",
+        t.max_duty(),
+        if t.is_monotonic() { "yes" } else { "NO" }
+    );
+    println!("Column 'level' is a firmware level index (dB), not a temperature.");
+    Ok(())
+}
+
+/// Switch thermal mode and report the firmware's actual state.
+fn thermal(mode: Option<&str>) -> anyhow::Result<()> {
+    use hp_wmi::ThermalMode;
+    let b = bios()?;
+    match mode {
+        None => {
+            let s = b.get_thermal_status()?;
+            println!("thermal status 0x28[8] = {s:#04X}");
+            match ThermalMode::from_status(s) {
+                Some(m) => println!("  -> {m}"),
+                None => println!("  -> unrecognised"),
+            }
+            println!("\navailable: balanced (0x30), performance (0x31), cool (0x50)");
+        }
+        Some(name) => {
+            let m = match name.to_ascii_lowercase().as_str() {
+                "balanced" | "default" | "l2" => ThermalMode::Balanced,
+                "performance" | "perf" | "l7" => ThermalMode::Performance,
+                "cool" | "l4" => ThermalMode::Cool,
+                other => anyhow::bail!(
+                    "unknown mode '{other}' - use balanced | performance | cool"
+                ),
+            };
+            let observed = b.set_fan_mode_verified(m)?;
+            let expected = m.expected_status();
+            println!("requested {name} (code {:#04X})", m.code());
+            println!("firmware status 0x28[8] = {observed:#04X} (expected {expected:#04X})");
+            if observed == expected {
+                println!("verified.");
+            } else {
+                anyhow::bail!("firmware did not settle on the expected mode");
+            }
         }
     }
     Ok(())

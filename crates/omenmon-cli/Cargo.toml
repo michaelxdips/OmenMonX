@@ -140,6 +140,14 @@ path = "src/bin/bmof_crack2.rs"
 name = "pl_effect"
 path = "src/bin/pl_effect.rs"
 
+[[bin]]
+name = "fan_semantics"
+path = "src/bin/fan_semantics.rs"
+
+[[bin]]
+name = "tdp_persist"
+path = "src/bin/tdp_persist.rs"
+
 [lib]
 name = "omenmon_cli"
 path = "src/lib.rs"
@@ -152,6 +160,8 @@ wmi = "0.14"
 windows = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+
+
 
 
 
