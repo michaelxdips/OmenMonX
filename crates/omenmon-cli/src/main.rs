@@ -49,6 +49,14 @@ enum Command {
         #[arg(long)]
         color: Option<String>,
     },
+    /// BIOS settings: list, or read/write one setting
+    Bios {
+        /// Setting name to read, or to write together with --set
+        name: Option<String>,
+        /// New value (requires a name)
+        #[arg(long)]
+        set: Option<String>,
+    },
     /// Long-running daemon (single-instance, battery alerts, curve loop)
     Daemon,
 }
@@ -66,6 +74,7 @@ fn main() -> anyhow::Result<()> {
         Command::Curve => fan_curve()?,
         Command::Thermal { mode } => thermal(mode.as_deref())?,
         Command::Kbd { zone, color } => kbd(zone, color.as_deref())?,
+        Command::Bios { name, set } => bios_settings(name.as_deref(), set.as_deref())?,
         Command::Daemon => daemon::run()?,
     }
     Ok(())
@@ -83,7 +92,16 @@ fn battery() -> anyhow::Result<()> {
         "AC:              {}",
         if info.ac_online { "plugged in" } else { "on battery" }
     );
-    println!("state:           {}", if info.charging { "charging" } else { "discharging/idle" });
+    println!(
+        "state:           {}",
+        if info.charging {
+            "charging"
+        } else if info.ac_online {
+            "idle on AC (full)"
+        } else {
+            "discharging"
+        }
+    );
     println!(
         "health:          {:>3} %  (full {} mWh / design {} mWh)",
         info.health_pct.map(|v| v.to_string()).unwrap_or("n/a".into()),
@@ -161,9 +179,8 @@ fn status() -> anyhow::Result<()> {
             .unwrap_or("n/a".into())
     );
     println!(
-        "curve target: {} % (fan write {})",
-        st.target_fan_pct,
-        if st.fan_write_active { "ACTIVE" } else { "awaiting firmware path" }
+        "curve target: {} % (informational only - 0x2E/0x32 are no-ops on this board)",
+        st.target_fan_pct
     );
     let b = hp_core::battery::read_battery();
     println!(
@@ -267,6 +284,86 @@ fn fan_curve() -> anyhow::Result<()> {
 }
 
 /// Switch thermal mode and report the firmware's actual state.
+fn bios_settings(name: Option<&str>, set: Option<&str>) -> anyhow::Result<()> {
+    use hp_wmi::BiosSettings;
+
+    let s = BiosSettings::connect()
+        .map_err(|e| anyhow::anyhow!("{e} (elevated run required)"))?;
+
+    match (name, set) {
+        // List everything.
+        (None, _) => {
+            let all = s.list().map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("BIOS settings ({} entries)", all.len());
+            println!("{}", "=".repeat(64));
+            for x in &all {
+                let ro = if x.read_only { "RO" } else { "  " };
+                println!("[{ro}] {:<34} = {}", x.name, x.current);
+            }
+            println!("\nWritable settings can be changed with: omenmon bios <name> --set <value>");
+        }
+        // Read one.
+        (Some(n), None) => {
+            let all = s.list().map_err(|e| anyhow::anyhow!("{e}"))?;
+            match all.iter().find(|x| x.name.eq_ignore_ascii_case(n)) {
+                Some(x) => {
+                    println!("{} = {}", x.name, x.current);
+                    if !x.possible.is_empty() {
+                        println!("possible: {}", x.possible.join(" | "));
+                    }
+                    if x.read_only {
+                        println!("(read-only)");
+                    }
+                }
+                None => anyhow::bail!(
+                    "no setting named '{n}' is enumerated by this firmware"
+                ),
+            }
+        }
+        // Write one, then read back.
+        (Some(n), Some(v)) => {
+            let before = s
+                .list()
+                .ok()
+                .and_then(|all| all.into_iter().find(|x| x.name.eq_ignore_ascii_case(n)))
+                .map(|x| x.current)
+                .unwrap_or_default();
+            let r = s.set(n, v).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{n} <- '{v}'");
+            println!("firmware returned: {r}");
+            match r {
+                hp_wmi::SetResult::Accepted | hp_wmi::SetResult::AcceptedNeedsReboot => {
+                    let after = s
+                        .list()
+                        .ok()
+                        .and_then(|all| all.into_iter().find(|x| x.name.eq_ignore_ascii_case(n)))
+                        .map(|x| x.current)
+                        .unwrap_or_default();
+                    println!("readback: '{}' -> '{}'", before, after);
+                    if after != v {
+                        println!("note: readback does not equal the requested value");
+                    }
+                }
+                hp_wmi::SetResult::ValueRejected => {
+                    println!(
+                        "This setting exists but the firmware refuses this value.\n\
+                         On board 8C9C this is what 'Battery Care Function' does for every\n\
+                         value: the name is present in the image, the platform flag is off."
+                    );
+                }
+                hp_wmi::SetResult::UnknownSetting => {
+                    println!("No setting with that name exists in this firmware.");
+                }
+                hp_wmi::SetResult::Other(c) => {
+                    println!("Unexpected return code {c}; nothing was assumed.");
+                }
+            }
+        }
+        (None, Some(_)) => anyhow::bail!("--set needs a setting name"),
+    }
+    Ok(())
+}
+
 fn thermal(mode: Option<&str>) -> anyhow::Result<()> {
     use hp_wmi::ThermalMode;
     let b = bios()?;
@@ -362,17 +459,25 @@ fn probe() -> anyhow::Result<()> {
 
     print!("hpqBIntM instance:        OK (connected)\n");
 
-    match b.get_system() {
-        Ok(r) => {
+    match b.get_system_data() {
+        Ok(s) => {
             println!("GetSystem (0x28):         OK");
-            if r.data.len() > 1 {
-                println!("  SysSupportFlags:        0x{:02X}", r.data[1]);
-            }
-            if r.data.len() > 2 {
-                println!("  SysSupportFlags2:       0x{:02X}", r.data[2]);
-            }
+            println!("  StatusFlags:            0x{:04X}  (PPAB bits: 3/4/8 = {}/{}/{})",
+                s.status_flags,
+                s.status_flags & 0x0008 != 0,
+                s.status_flags & 0x0010 != 0,
+                s.status_flags & 0x0100 != 0);
+            println!("  ThermalPolicy:           {} ({})", s.thermal_policy,
+                if s.thermal_policy_v1() { "V1 - mode remap applies" } else { "legacy V0" });
+            println!("  SupportFlags:            0x{:02X}  SwFanCtl={} ExtremeMode={} TwoBytePL4={}",
+                s.support_flags, s.sw_fan_control(), s.extreme_mode(), s.two_byte_pl4());
+            println!("  DefaultPL4:              {} W", s.default_pl4);
+            println!("  BiosOc:                  {} ({})", s.bios_oc,
+                if s.bios_oc_supported() { "supported" } else { "NOT supported" });
+            println!("  GpuModeSwitch:           0x{:02X}", s.gpu_mode_switch);
+            println!("  DefaultPLwGpu:           {} W", s.default_pl_with_gpu);
         }
-        Err(e) => println!("GetSystem (0x28):         FAIL — {e}"),
+        Err(e) => println!("GetSystem (0x28):         FAIL - {e}"),
     }
     match b.get_fan_count() {
         Ok(n) => println!("GetFanCount (0x10):       OK — {n} fan(s)"),

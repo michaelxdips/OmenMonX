@@ -148,6 +148,22 @@ path = "src/bin/fan_semantics.rs"
 name = "tdp_persist"
 path = "src/bin/tdp_persist.rs"
 
+[[bin]]
+name = "kbd_flag"
+path = "src/bin/kbd_flag.rs"
+
+[[bin]]
+name = "adapter_probe"
+path = "src/bin/adapter_probe.rs"
+
+[[bin]]
+name = "budget_probe"
+path = "src/bin/budget_probe.rs"
+
+[[bin]]
+name = "bios_var_type"
+path = "src/bin/bios_var_type.rs"
+
 [lib]
 name = "omenmon_cli"
 path = "src/lib.rs"
@@ -160,6 +176,10 @@ wmi = "0.14"
 windows = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+
+
+
+
 
 
 
