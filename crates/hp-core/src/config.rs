@@ -52,6 +52,18 @@ pub struct Config {
     pub charge_alert_pct: u8,
     #[serde(default)]
     pub enable_charge_alerts: bool,
+
+    // ---- verified control channels ----
+    /// CPU power cap to apply at startup, in watts.
+    ///
+    /// `None` means "leave the firmware alone". The firmware resets to its own
+    /// default (25 W on board 8C9C) on every boot, so a persisted value has to be
+    /// re-applied explicitly.
+    #[serde(default)]
+    pub power_cap_watts: Option<u8>,
+    /// Thermal mode to apply at startup: "balanced", "performance" or "cool".
+    #[serde(default)]
+    pub thermal_mode: Option<String>,
 }
 
 fn default_health_warn() -> u8 { 70 }
@@ -78,6 +90,29 @@ impl Config {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(&p, toml::to_string_pretty(self).unwrap_or_default())
+    }
+
+    /// Parse the persisted thermal mode string.
+    ///
+    /// Unknown values are treated as "not set" rather than defaulting to a mode,
+    /// so a typo in the config file cannot silently change machine behaviour.
+    pub fn thermal_mode_parsed(&self) -> Option<&'static str> {
+        match self.thermal_mode.as_deref()? {
+            "balanced" => Some("balanced"),
+            "performance" => Some("performance"),
+            "cool" => Some("cool"),
+            _ => None,
+        }
+    }
+
+    /// Persist a power cap. Pass `None` to clear it.
+    pub fn set_power_cap(&mut self, watts: Option<u8>) {
+        self.power_cap_watts = watts;
+    }
+
+    /// Persist a thermal mode by its CLI name. Pass `None` to clear it.
+    pub fn set_thermal_mode(&mut self, mode: Option<&str>) {
+        self.thermal_mode = mode.map(|s| s.to_string());
     }
 
     /// Interpolate the curve at a given temperature.

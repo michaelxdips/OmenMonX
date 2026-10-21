@@ -4,169 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The shipped binary.
 [[bin]]
 name = "omenmon"
 path = "src/main.rs"
 
-[[bin]]
-name = "kbd_probe"
-path = "src/bin/kbd_probe.rs"
-
-[[bin]]
-name = "kbd_rmw"
-path = "src/bin/kbd_rmw.rs"
-
-[[bin]]
-name = "power_series"
-path = "src/bin/power_series.rs"
-
-[[bin]]
-name = "omenmon-setup"
-path = "src/bin/setup.rs"
-
-[[bin]]
-name = "power_probe"
-path = "src/bin/power_probe.rs"
-
-[[bin]]
-name = "batt_hunt"
-path = "src/bin/batt_hunt.rs"
-
-[[bin]]
-name = "batt_hunt2"
-path = "src/bin/batt_hunt2.rs"
-
-[[bin]]
-name = "write_verify"
-path = "src/bin/write_verify.rs"
-
-[[bin]]
-name = "thermal_sweep"
-path = "src/bin/thermal_sweep.rs"
-
-[[bin]]
-name = "thermal_verify"
-path = "src/bin/thermal_verify.rs"
-
-[[bin]]
-name = "cap_probe"
-path = "src/bin/cap_probe.rs"
-
-[[bin]]
-name = "cpu_power_test"
-path = "src/bin/cpu_power_test.rs"
-
-[[bin]]
-name = "power_semantics"
-path = "src/bin/power_semantics.rs"
-
-[[bin]]
-name = "ecmm_probe"
-path = "src/bin/ecmm_probe.rs"
-
-[[bin]]
-name = "smu_probe"
-path = "src/bin/smu_probe.rs"
-
-[[bin]]
-name = "pmtable_anchor"
-path = "src/bin/pmtable_anchor.rs"
-
-[[bin]]
-name = "smu_mailbox"
-path = "src/bin/smu_mailbox.rs"
-
-[[bin]]
-name = "power_restore"
-path = "src/bin/power_restore.rs"
-
-[[bin]]
-name = "pmtable_semantics"
-path = "src/bin/pmtable_semantics.rs"
-
-[[bin]]
-name = "pmtable_refresh"
-path = "src/bin/pmtable_refresh.rs"
-
-[[bin]]
-name = "stapm_effect"
-path = "src/bin/stapm_effect.rs"
-
-[[bin]]
-name = "kbd_verify"
-path = "src/bin/kbd_verify.rs"
-
-[[bin]]
-name = "pl_retest"
-path = "src/bin/pl_retest.rs"
-
-[[bin]]
-name = "tdp_confirm"
-path = "src/bin/tdp_confirm.rs"
-
-[[bin]]
-name = "pl_forma"
-path = "src/bin/pl_forma.rs"
-
-[[bin]]
-name = "pl_forma_confirm"
-path = "src/bin/pl_forma_confirm.rs"
-
-[[bin]]
-name = "pl_range"
-path = "src/bin/pl_range.rs"
-
-[[bin]]
-name = "fan_cols"
-path = "src/bin/fan_cols.rs"
-
-[[bin]]
-name = "fan_write_test"
-path = "src/bin/fan_write_test.rs"
-
-[[bin]]
-name = "fan_safety"
-path = "src/bin/fan_safety.rs"
-
-[[bin]]
-name = "bmof_crack"
-path = "src/bin/bmof_crack.rs"
-
-[[bin]]
-name = "bmof_crack2"
-path = "src/bin/bmof_crack2.rs"
-
-[[bin]]
-name = "pl_effect"
-path = "src/bin/pl_effect.rs"
-
-[[bin]]
-name = "fan_semantics"
-path = "src/bin/fan_semantics.rs"
-
-[[bin]]
-name = "tdp_persist"
-path = "src/bin/tdp_persist.rs"
-
-[[bin]]
-name = "kbd_flag"
-path = "src/bin/kbd_flag.rs"
-
-[[bin]]
-name = "adapter_probe"
-path = "src/bin/adapter_probe.rs"
-
-[[bin]]
-name = "budget_probe"
-path = "src/bin/budget_probe.rs"
-
-[[bin]]
-name = "bios_var_type"
-path = "src/bin/bios_var_type.rs"
-
 [lib]
 name = "omenmon_cli"
 path = "src/lib.rs"
+
+[features]
+default = []
+# Hardware probes: reverse-engineering instruments, not product features.
+# They are excluded from the default build so `cargo build` produces only the
+# real binary. Build them with `--features probes`.
+probes = []
 
 [dependencies]
 hp-wmi = { path = "../hp-wmi" }
@@ -177,33 +29,345 @@ windows = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 
+# ---------------------------------------------------------------------------
+# Probe binaries. Each is a standalone hardware instrument used during the
+# 2026-10-21 reverse-engineering pass. All gated behind `--features probes`.
+#
+# They are kept in-tree because they are the evidence trail for REPORT-2026-10-21.md:
+# every VERIFIED claim in that document can be re-run from here.
+# ---------------------------------------------------------------------------
 
+[[bin]]
+name = "kbd_probe"
+path = "src/bin/kbd_probe.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "kbd_rmw"
+path = "src/bin/kbd_rmw.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "kbd_verify"
+path = "src/bin/kbd_verify.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "kbd_flag"
+path = "src/bin/kbd_flag.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "power_series"
+path = "src/bin/power_series.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "power_probe"
+path = "src/bin/power_probe.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "power_semantics"
+path = "src/bin/power_semantics.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "power_restore"
+path = "src/bin/power_restore.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "cpu_power_test"
+path = "src/bin/cpu_power_test.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "pl_retest"
+path = "src/bin/pl_retest.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "pl_forma"
+path = "src/bin/pl_forma.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "pl_forma_confirm"
+path = "src/bin/pl_forma_confirm.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "pl_range"
+path = "src/bin/pl_range.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "pl_effect"
+path = "src/bin/pl_effect.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "tdp_confirm"
+path = "src/bin/tdp_confirm.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "tdp_persist"
+path = "src/bin/tdp_persist.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "adapter_probe"
+path = "src/bin/adapter_probe.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "budget_probe"
+path = "src/bin/budget_probe.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "stapm_effect"
+path = "src/bin/stapm_effect.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "smu_probe"
+path = "src/bin/smu_probe.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "smu_mailbox"
+path = "src/bin/smu_mailbox.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "pmtable_anchor"
+path = "src/bin/pmtable_anchor.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "pmtable_semantics"
+path = "src/bin/pmtable_semantics.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "pmtable_refresh"
+path = "src/bin/pmtable_refresh.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "thermal_sweep"
+path = "src/bin/thermal_sweep.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "thermal_verify"
+path = "src/bin/thermal_verify.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "fan_cols"
+path = "src/bin/fan_cols.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "fan_semantics"
+path = "src/bin/fan_semantics.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "fan_write_test"
+path = "src/bin/fan_write_test.rs"
+required-features = ["probes"]
 
+[[bin]]
+name = "fan_safety"
+path = "src/bin/fan_safety.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "batt_hunt"
+path = "src/bin/batt_hunt.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "batt_hunt2"
+path = "src/bin/batt_hunt2.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ecmm_probe"
+path = "src/bin/ecmm_probe.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "cap_probe"
+path = "src/bin/cap_probe.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "write_verify"
+path = "src/bin/write_verify.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "bmof_crack"
+path = "src/bin/bmof_crack.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "bmof_crack2"
+path = "src/bin/bmof_crack2.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "bios_var_type"
+path = "src/bin/bios_var_type.rs"
+required-features = ["probes"]
+
+# Always built: the live watch tool is a product feature, not a probe.
+[[bin]]
+name = "watch"
+path = "src/bin/watch.rs"
+
+[[bin]]
+name = "omenmon-setup"
+path = "src/bin/setup.rs"
+
+# Existing probes that predate this pass.
+[[bin]]
+name = "ec_bank"
+path = "src/bin/ec_bank.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ec_cleanup"
+path = "src/bin/ec_cleanup.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ec_corr"
+path = "src/bin/ec_corr.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ec_handshake"
+path = "src/bin/ec_handshake.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ec_map"
+path = "src/bin/ec_map.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ec_probe"
+path = "src/bin/ec_probe.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ec_watch"
+path = "src/bin/ec_watch.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ercd_hunt"
+path = "src/bin/ercd_hunt.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ercd_replay"
+path = "src/bin/ercd_replay.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "ercd_write"
+path = "src/bin/ercd_write.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "erib_brute"
+path = "src/bin/erib_brute.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_battery"
+path = "src/bin/fan_battery.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_duty"
+path = "src/bin/fan_duty.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_lvl11"
+path = "src/bin/fan_lvl11.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_manual"
+path = "src/bin/fan_manual.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_mode_watch"
+path = "src/bin/fan_mode_watch.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_rpm"
+path = "src/bin/fan_rpm.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_table"
+path = "src/bin/fan_table.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_test"
+path = "src/bin/fan_test.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_test2"
+path = "src/bin/fan_test2.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_test3"
+path = "src/bin/fan_test3.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_variants"
+path = "src/bin/fan_variants.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_write"
+path = "src/bin/fan_write.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "hybrid_dbg"
+path = "src/bin/hybrid_dbg.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "matrix_dbg"
+path = "src/bin/matrix_dbg.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "mega_scan"
+path = "src/bin/mega_scan.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "scan_ext"
+path = "src/bin/scan_ext.rs"
+required-features = ["probes"]

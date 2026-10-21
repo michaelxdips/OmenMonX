@@ -49,6 +49,10 @@ enum Command {
         #[arg(long)]
         color: Option<String>,
     },
+    /// Re-apply the saved power cap and thermal mode (for a login task)
+    Apply,
+    /// Clear saved preferences and restore firmware defaults
+    RestoreDefaults,
     /// BIOS settings: list, or read/write one setting
     Bios {
         /// Setting name to read, or to write together with --set
@@ -74,6 +78,8 @@ fn main() -> anyhow::Result<()> {
         Command::Curve => fan_curve()?,
         Command::Thermal { mode } => thermal(mode.as_deref())?,
         Command::Kbd { zone, color } => kbd(zone, color.as_deref())?,
+        Command::Apply => apply_saved()?,
+        Command::RestoreDefaults => restore_defaults()?,
         Command::Bios { name, set } => bios_settings(name.as_deref(), set.as_deref())?,
         Command::Daemon => daemon::run()?,
     }
@@ -247,6 +253,75 @@ fn power_cap(watts: u8) -> anyhow::Result<()> {
         );
     }
     println!("verified by readback.");
+
+    // Persist so the choice survives a reboot. The firmware resets its limits on
+    // every boot, so a saved value is only meaningful if something re-applies it.
+    let mut cfg = hp_core::Config::load();
+    cfg.set_power_cap(Some(applied));
+    match cfg.save() {
+        Ok(_) => println!("saved: will re-apply {applied} W on `omenmon apply`"),
+        Err(e) => println!("warning: could not save preference: {e}"),
+    }
+    Ok(())
+}
+
+/// Re-apply the persisted power cap and thermal mode.
+///
+/// The firmware resets both on every boot, so this is what a login task or the
+/// daemon should call. With no saved preference it changes nothing.
+fn apply_saved() -> anyhow::Result<()> {
+    let cfg = hp_core::Config::load();
+    let b = bios()?;
+    let mut did_anything = false;
+
+    if let Some(w) = cfg.power_cap_watts {
+        let applied = b.set_power_limit(w)?;
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let after = b.get_cpu_power()?;
+        println!("power cap: requested {w} W -> firmware holds {} W", after.pl1);
+        if after.pl1 != applied {
+            println!("  warning: firmware did not hold the requested value");
+        }
+        did_anything = true;
+    }
+
+    if let Some(name) = cfg.thermal_mode_parsed() {
+        use hp_wmi::ThermalMode;
+        let m = match name {
+            "performance" => ThermalMode::Performance,
+            "cool" => ThermalMode::Cool,
+            _ => ThermalMode::Balanced,
+        };
+        let observed = b.set_fan_mode_verified(m)?;
+        println!(
+            "thermal: {name} -> firmware status {observed:#04X} (expected {:#04X})",
+            m.expected_status()
+        );
+        did_anything = true;
+    }
+
+    if !did_anything {
+        println!("nothing saved to apply (set one with `omenmon cap <w>` or `omenmon thermal <mode>`)");
+    }
+    Ok(())
+}
+
+/// Clear the saved preferences and put the firmware back to its own defaults.
+fn restore_defaults() -> anyhow::Result<()> {
+    let b = bios()?;
+    let applied = b.set_power_limit(hp_wmi::CpuPowerLimits::MAX_WATTS)?;
+    b.set_fan_mode(hp_wmi::ThermalMode::Balanced.code())?;
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    let after = b.get_cpu_power()?;
+    println!("power cap: {applied} W (firmware maximum) -> holds {} W", after.pl1);
+    println!("thermal: balanced");
+    let mut cfg = hp_core::Config::load();
+    cfg.set_power_cap(None);
+    cfg.set_thermal_mode(None);
+    match cfg.save() {
+        Ok(_) => println!("saved preferences cleared"),
+        Err(e) => println!("warning: could not clear preferences: {e}"),
+    }
     Ok(())
 }
 
@@ -392,6 +467,18 @@ fn thermal(mode: Option<&str>) -> anyhow::Result<()> {
             println!("firmware status 0x28[8] = {observed:#04X} (expected {expected:#04X})");
             if observed == expected {
                 println!("verified.");
+                let mut cfg = hp_core::Config::load();
+                cfg.set_thermal_mode(Some(
+                    match m {
+                        ThermalMode::Performance => "performance",
+                        ThermalMode::Cool => "cool",
+                        ThermalMode::Balanced => "balanced",
+                    },
+                ));
+                match cfg.save() {
+                    Ok(_) => println!("saved: will re-apply on `omenmon apply`"),
+                    Err(e) => println!("warning: could not save preference: {e}"),
+                }
             } else {
                 anyhow::bail!("firmware did not settle on the expected mode");
             }

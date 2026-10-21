@@ -7,7 +7,7 @@ mod sampler;
 mod updater;
 
 use eframe::egui;
-use egui_plot::{Line, Plot, PlotPoints, Points};
+use egui_plot::{Line, Plot, PlotPoints};
 use sampler::{History, Sampler};
 use updater::UpdateHandle;
 
@@ -33,10 +33,7 @@ fn temp_color(t: f32) -> egui::Color32 {
 
 struct App {
     sampler: Sampler,
-    curve_pts: Vec<[f64; 2]>,
     updates: UpdateHandle,
-    dirty: bool,
-    last_save: std::time::Instant,
     install_dir: String,
 }
 
@@ -61,35 +58,11 @@ impl App {
         style.visuals.override_text_color = Some(TEXT);
         ctx.set_style(style);
 
-        let cfg = hp_core::Config::load();
-        let curve_pts = cfg
-            .profile
-            .curve
-            .iter()
-            .map(|p| [p.temp_c as f64, p.fan_pct as f64])
-            .collect();
         Self {
             sampler: Sampler::spawn(1000),
-            curve_pts,
             updates: UpdateHandle::default(),
-            dirty: false,
-            last_save: std::time::Instant::now(),
             install_dir: install_dir_guess(),
         }
-    }
-
-    fn save_curve(&self) {
-        let mut cfg = hp_core::Config::load();
-        cfg.profile.curve = self
-            .curve_pts
-            .iter()
-            .map(|p| hp_core::config::FanCurvePoint {
-                temp_c: p[0].round().clamp(0.0, 120.0) as u8,
-                fan_pct: p[1].round().clamp(0.0, 100.0) as u8,
-            })
-            .collect();
-        cfg.profile.curve.sort_by_key(|p| p.temp_c);
-        let _ = cfg.save();
     }
 }
 
@@ -97,12 +70,6 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
 
-        // autosave edited curve every 2 s
-        if self.dirty && self.last_save.elapsed().as_secs() >= 2 {
-            self.save_curve();
-            self.dirty = false;
-            self.last_save = std::time::Instant::now();
-        }
 
         let st = self.sampler.state.lock().clone();
         let hist = self.sampler.history.lock().clone();
@@ -144,7 +111,9 @@ impl eframe::App for App {
                         battery_card(ui, st.battery.as_ref());
                     });
                     cols[1].vertical(|ui| {
-                        curve_card(ui, &mut self.curve_pts, &st.target_fan_pct, &mut self.dirty);
+                        curve_card(ui, st.fan_table.as_ref());
+                        ui.add_space(10.0);
+                        control_card(ui, &st, &self.sampler.request);
                         ui.add_space(10.0);
                         updater_card(ui, &self.updates, &self.install_dir);
                     });
@@ -154,7 +123,6 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.sampler.stop();
-        self.save_curve();
     }
 }
 
@@ -318,86 +286,221 @@ fn battery_card(ui: &mut egui::Ui, b: Option<&hp_core::battery::BatteryInfo>) {
     });
 }
 
-fn curve_card(ui: &mut egui::Ui, pts: &mut Vec<[f64; 2]>, target: &u8, dirty: &mut bool) {
-    card(ui, "FAN CURVE", |ui| {
+/// Read-only view of the firmware's own fan curve.
+///
+/// This replaces the previous draggable editor. On board 8C9C the fan write
+/// paths are inert — `0x2E` (SetSwFanControlLevel) and `0x32` (SetFanTable) both
+/// accept a payload and change nothing, and the EC never enters manual mode — so
+/// an editable curve here would be a control that lies. What the firmware does
+/// expose is the real 42-point table, which OGH never shows.
+fn curve_card(ui: &mut egui::Ui, table: Option<&hp_wmi::FanTable>) {
+    card(ui, "FAN CURVE (firmware)", |ui| {
+        let Some(t) = table else {
+            ui.label(egui::RichText::new("curve unavailable").color(DIM).monospace());
+            return;
+        };
+
         ui.label(
-            egui::RichText::new("drag the nearest point to edit · autosaved")
-                .color(DIM)
-                .small(),
+            egui::RichText::new(format!(
+                "{} fans · {} points · read-only",
+                t.fan_count, t.level_count
+            ))
+            .color(DIM)
+            .small()
+            .monospace(),
         );
-        let lines = pts.clone();
-        let resp = Plot::new("curve")
-            .height(190.0)
+        ui.add_space(4.0);
+
+        // Plot duty against the level index. Column 0 is a firmware level index
+        // (dB), not a temperature, so the x-axis is labelled accordingly.
+        let fans = t.fan_count as usize;
+        let series: Vec<Vec<[f64; 2]>> = (0..fans.min(3))
+            .map(|f| {
+                t.points
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, p)| p.duty(f, t.fan_count).map(|d| [i as f64, d as f64]))
+                    .collect()
+            })
+            .collect();
+
+        Plot::new("fw_curve")
+            .height(170.0)
             .allow_boxed_zoom(false)
             .allow_scroll(false)
             .allow_drag(false)
-            .x_axis_label("°C")
-            .y_axis_label("%")
+            .allow_zoom(false)
+            .x_axis_label("level")
+            .y_axis_label("duty %")
             .show(ui, |p| {
-                p.line(
-                    Line::new(PlotPoints::from(lines.clone()))
-                        .name("curve")
-                        .color(AMBER)
-                        .width(2.0),
-                );
-                p.line(
-                    Line::new(PlotPoints::new(vec![
-                        [0.0, *target as f64],
-                        [100.0, *target as f64],
-                    ]))
-                    .name("target")
-                    .color(RED)
-                    .width(1.0),
-                );
-                for (i, pt) in pts.iter().enumerate() {
-                    p.points(
-                        Points::new(PlotPoints::new(vec![*pt]))
-                            .id(egui::Id::new(("curve_pt", i)))
-                            .radius(5.0)
-                            .color(AMBER)
-                            .highlight(true),
+                for (f, pts) in series.iter().enumerate() {
+                    let colour = if f == 0 { AMBER } else { BLUE };
+                    p.line(
+                        Line::new(PlotPoints::from(pts.clone()))
+                            .name(format!("fan{}", f + 1))
+                            .color(colour)
+                            .width(2.0),
                     );
                 }
             });
-        // drag nearest point under pointer
-        if resp.response.dragged() {
-            if let Some(pos) = resp.response.interact_pointer_pos() {
-                if let Some(coord) = Some(resp.transform.value_from_position(pos)) {
-                    if let Some(nearest) = pts
-                        .iter()
-                        .enumerate()
-                        .min_by(|a, b| {
-                            let d = |p: &[f64; 2]| {
-                                (p[0] - coord.x).powi(2) + (p[1] - coord.y).powi(2)
-                            };
-                            d(a.1).partial_cmp(&d(b.1)).unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(i, _)| i)
-                    {
-                        let p = pts[nearest];
-                        let dist = ((p[0] - coord.x).powi(2) + (p[1] - coord.y).powi(2)).sqrt();
-                        if dist < 6.0 {
-                            pts[nearest] = [
-                                coord.x.clamp(0.0, 120.0).round(),
-                                coord.y.clamp(0.0, 100.0).round(),
-                            ];
-                            *dirty = true;
-                            pts.sort_by(|a, b| {
-                                a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                        }
-                    }
-                }
-            }
-        }
+
+        ui.add_space(2.0);
         ui.label(
-            egui::RichText::new(format!("{} points · autosaved to config.toml", pts.len()))
+            egui::RichText::new(format!(
+                "peak duty {}%  ·  monotonic: {}",
+                t.max_duty(),
+                if t.is_monotonic() { "yes" } else { "no" }
+            ))
+            .color(DIM)
+            .small()
+            .monospace(),
+        );
+        ui.label(
+            egui::RichText::new("column 0 is a firmware level index, not a temperature")
                 .color(DIM)
-                .small(),
+                .small()
+                .monospace(),
         );
     });
 }
 
+/// Power cap + thermal mode. Both channels are verified on this board.
+///
+/// The cap is a downward-only ceiling: the firmware accepts 5..25 W and resets
+/// anything above 25 to 25. It is a quiet/cool control, never a boost.
+fn control_card(
+    ui: &mut egui::Ui,
+    st: &sampler::SharedState,
+    request: &parking_lot::Mutex<Option<sampler::ControlRequest>>,
+) {
+    use hp_wmi::{CpuPowerLimits, ThermalMode};
+
+    card(ui, "POWER & THERMAL", |ui| {
+        // ---- current limits ----
+        match st.limits {
+            Some(l) => {
+                ui.horizontal(|ui| {
+                    for (name, v) in [
+                        ("PL1", l.pl1),
+                        ("PL2", l.pl2),
+                        ("PL4", l.pl4),
+                        ("GPU", l.pl_with_gpu),
+                    ] {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(name).color(DIM).small().monospace());
+                            ui.label(
+                                egui::RichText::new(format!("{v} W"))
+                                    .color(AMBER)
+                                    .monospace()
+                                    .size(16.0),
+                            );
+                        });
+                        ui.add_space(10.0);
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("CLOCK").color(DIM).small().monospace());
+                        ui.label(
+                            egui::RichText::new(format!("{:.0} MHz", st.clock_mhz))
+                                .color(BLUE)
+                                .monospace()
+                                .size(16.0),
+                        );
+                    });
+                });
+            }
+            None => {
+                ui.label(egui::RichText::new("limits unavailable").color(DIM).monospace());
+            }
+        }
+
+        ui.add_space(8.0);
+
+        // ---- cap slider ----
+        // The slider is bounded by the proven window, so it cannot offer a value
+        // the firmware will silently reject.
+        let mut cap = st.limits.map(|l| l.pl1).unwrap_or(CpuPowerLimits::MAX_WATTS);
+        ui.label(
+            egui::RichText::new(format!(
+                "power cap  ({}–{} W, downward only)",
+                CpuPowerLimits::MIN_WATTS,
+                CpuPowerLimits::MAX_WATTS
+            ))
+            .color(DIM)
+            .small()
+            .monospace(),
+        );
+        let resp = ui.add(
+            egui::Slider::new(
+                &mut cap,
+                CpuPowerLimits::MIN_WATTS..=CpuPowerLimits::MAX_WATTS,
+            )
+            .suffix(" W"),
+        );
+        if resp.drag_stopped() || resp.lost_focus() {
+            *request.lock() = Some(sampler::ControlRequest::SetPowerCap(cap));
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button("restore default").clicked() {
+                *request.lock() = Some(sampler::ControlRequest::RestoreDefault);
+            }
+            ui.label(
+                egui::RichText::new("firmware resets to 25 W on its own")
+                    .color(DIM)
+                    .small()
+                    .monospace(),
+            );
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        // ---- thermal mode ----
+        let status = st.thermal_status;
+        let current = ThermalMode::from_status(status).unwrap_or("unknown");
+        ui.label(
+            egui::RichText::new(format!("thermal mode  (firmware status {status:#04X} — {current})"))
+                .color(DIM)
+                .small()
+                .monospace(),
+        );
+        ui.horizontal(|ui| {
+            for (label, mode) in [
+                ("balanced", ThermalMode::Balanced),
+                ("performance", ThermalMode::Performance),
+                ("cool", ThermalMode::Cool),
+            ] {
+                let active = status == mode.expected_status();
+                let text = egui::RichText::new(label).monospace();
+                let text = if active { text.color(AMBER) } else { text.color(TEXT) };
+                if ui.add(egui::Button::new(text).small()).clicked() {
+                    *request.lock() = Some(sampler::ControlRequest::SetThermal(mode));
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new("status byte is read back from the firmware, not assumed")
+                .color(DIM)
+                .small()
+                .monospace(),
+        );
+
+        // ---- last write result ----
+        if let Some(msg) = &st.last_write {
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(msg)
+                    .color(if msg.contains("not") || msg.contains("failed") {
+                        RED
+                    } else {
+                        GREEN
+                    })
+                    .small()
+                    .monospace(),
+            );
+        }
+    });
+}
 fn updater_card(ui: &mut egui::Ui, handle: &UpdateHandle, install_dir: &str) {
     card(ui, "UPDATER", |ui| {
         let s = handle.0.lock();

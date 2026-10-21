@@ -1977,7 +1977,6 @@ dependencies = [
  "toml",
  "tracing",
  "ureq",
- "winapi",
 ]
 
 [[package]]
