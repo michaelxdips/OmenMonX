@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "omenmon-cli"
 version.workspace = true
 edition.workspace = true
@@ -28,6 +28,114 @@ path = "src/bin/setup.rs"
 name = "power_probe"
 path = "src/bin/power_probe.rs"
 
+[[bin]]
+name = "batt_hunt"
+path = "src/bin/batt_hunt.rs"
+
+[[bin]]
+name = "batt_hunt2"
+path = "src/bin/batt_hunt2.rs"
+
+[[bin]]
+name = "write_verify"
+path = "src/bin/write_verify.rs"
+
+[[bin]]
+name = "thermal_sweep"
+path = "src/bin/thermal_sweep.rs"
+
+[[bin]]
+name = "thermal_verify"
+path = "src/bin/thermal_verify.rs"
+
+[[bin]]
+name = "cap_probe"
+path = "src/bin/cap_probe.rs"
+
+[[bin]]
+name = "cpu_power_test"
+path = "src/bin/cpu_power_test.rs"
+
+[[bin]]
+name = "power_semantics"
+path = "src/bin/power_semantics.rs"
+
+[[bin]]
+name = "ecmm_probe"
+path = "src/bin/ecmm_probe.rs"
+
+[[bin]]
+name = "smu_probe"
+path = "src/bin/smu_probe.rs"
+
+[[bin]]
+name = "pmtable_anchor"
+path = "src/bin/pmtable_anchor.rs"
+
+[[bin]]
+name = "smu_mailbox"
+path = "src/bin/smu_mailbox.rs"
+
+[[bin]]
+name = "power_restore"
+path = "src/bin/power_restore.rs"
+
+[[bin]]
+name = "pmtable_semantics"
+path = "src/bin/pmtable_semantics.rs"
+
+[[bin]]
+name = "pmtable_refresh"
+path = "src/bin/pmtable_refresh.rs"
+
+[[bin]]
+name = "stapm_effect"
+path = "src/bin/stapm_effect.rs"
+
+[[bin]]
+name = "kbd_verify"
+path = "src/bin/kbd_verify.rs"
+
+[[bin]]
+name = "pl_retest"
+path = "src/bin/pl_retest.rs"
+
+[[bin]]
+name = "tdp_confirm"
+path = "src/bin/tdp_confirm.rs"
+
+[[bin]]
+name = "pl_forma"
+path = "src/bin/pl_forma.rs"
+
+[[bin]]
+name = "pl_forma_confirm"
+path = "src/bin/pl_forma_confirm.rs"
+
+[[bin]]
+name = "pl_range"
+path = "src/bin/pl_range.rs"
+
+[[bin]]
+name = "fan_cols"
+path = "src/bin/fan_cols.rs"
+
+[[bin]]
+name = "fan_write_test"
+path = "src/bin/fan_write_test.rs"
+
+[[bin]]
+name = "fan_safety"
+path = "src/bin/fan_safety.rs"
+
+[[bin]]
+name = "bmof_crack"
+path = "src/bin/bmof_crack.rs"
+
+[[bin]]
+name = "bmof_crack2"
+path = "src/bin/bmof_crack2.rs"
+
 [lib]
 name = "omenmon_cli"
 path = "src/lib.rs"
@@ -40,3 +148,27 @@ wmi = "0.14"
 windows = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

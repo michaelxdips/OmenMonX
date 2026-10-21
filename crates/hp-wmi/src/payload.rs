@@ -96,6 +96,15 @@ mod tests {
         let resp = Response { return_code: 0, data: vec![0x2C, 0x01, 0x37, 0x00] };
         assert_eq!(resp.byte0(), Some(0x2C));
         assert_eq!(resp.u16_at(0), Some(0x012C));
-        assert_eq!(resp.u32_at(2), Some(0x37));
+        // u32_at(0) fits exactly in a 4-byte buffer.
+        assert_eq!(resp.u32_at(0), Some(0x0037_012C));
+        // u32_at(2) would need 6 bytes, so it must refuse rather than read past the end.
+        assert_eq!(resp.u32_at(2), None);
+        // A wider buffer lets the same offset succeed.
+        let wide = Response {
+            return_code: 0,
+            data: vec![0x2C, 0x01, 0x37, 0x00, 0x00, 0x00],
+        };
+        assert_eq!(wide.u32_at(2), Some(0x37));
     }
 }
