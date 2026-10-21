@@ -1,0 +1,22 @@
+[package]
+name = "omenmon-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "omenmon"
+path = "src/main.rs"
+
+[[bin]]
+name = "omenmon-setup"
+path = "src/bin/setup.rs"
+
+[dependencies]
+hp-wmi = { path = "../hp-wmi" }
+hp-ec = { path = "../hp-ec" }
+hp-core = { path = "../hp-core" }
+wmi = "0.14"
+windows = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

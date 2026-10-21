@@ -1,0 +1,16 @@
+﻿[package]
+name = "hp-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hp-wmi = { path = "../hp-wmi" }
+hp-ec = { path = "../hp-ec" }
+windows = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+wmi = "0.14"

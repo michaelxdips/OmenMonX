@@ -1,0 +1,47 @@
+﻿[workspace]
+resolver = "2"
+members = [
+    "crates/hp-wmi",
+    "crates/hp-ec",
+    "crates/hp-core",
+    "crates/omenmon-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Michael"]
+repository = "https://github.com/michaelxdips/OmenMon"
+
+[workspace.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_Wmi",
+    "Win32_System_Threading",
+    "Win32_System_Services",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_IO",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_Rpc",
+    "Win32_System_Variant",
+] }
+windows-core = "0.58"
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+
