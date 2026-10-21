@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use hp_wmi::Bios;
 use hp_core as _;
 
+mod console;
 mod daemon {
     #[path = "../daemon_bin.rs"]
     pub mod daemon_impl;
@@ -66,6 +67,7 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
+    console::init();
     let cli = Cli::parse();
     match cli.command {
         Command::Probe => probe()?,
@@ -141,7 +143,7 @@ fn battery() -> anyhow::Result<()> {
         }
     );
     if let Some(t) = info.temp_c {
-        println!("temperature:     {t:.1} °C");
+        println!("temperature:     {}", console::temp_c1(t));
     }
     Ok(())
 }
@@ -170,11 +172,11 @@ fn status() -> anyhow::Result<()> {
     println!("omenmon status");
     println!("{}", "=".repeat(50));
     println!(
-        "CPU: {:.0} °C   GPU: {:.0} °C   hotspot: {}",
+        "CPU: {}   GPU: {}   hotspot: {}",
         s.cpu.unwrap_or(0.0),
         s.gpu.unwrap_or(0.0),
         s.gpu_hotspot
-            .map(|v| format!("{v:.0} °C"))
+            .map(console::temp_c)
             .unwrap_or("n/a".into())
     );
     println!(
@@ -597,7 +599,7 @@ fn probe() -> anyhow::Result<()> {
     println!("{}", "=".repeat(55));
     let b = bios()?;
 
-    print!("hpqBIntM instance:        OK (connected)\n");
+    println!("hpqBIntM instance:        OK (connected)");
 
     match b.get_system_data() {
         Ok(s) => {
@@ -695,7 +697,7 @@ fn temps() -> anyhow::Result<()> {
     for sensor in [0u8, 1, 2, 3] {
         if let Ok(r) = b.get_temperature(sensor) {
             if r.is_ok() {
-                println!("sensor {sensor}: {} °C", r.byte0().unwrap_or(0));
+                println!("sensor {sensor}: {}C", r.byte0().unwrap_or(0));
             }
         }
     }

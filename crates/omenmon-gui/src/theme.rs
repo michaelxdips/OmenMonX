@@ -28,35 +28,25 @@ pub const LABEL: f32 = 11.0;
 /// Sidebar width. Wide enough for "Performance" at the body size.
 pub const RAIL_W: f32 = 212.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
+    #[default]
     Dark,
     Light,
 }
 
-impl Default for Theme {
-    fn default() -> Self {
-        Theme::Dark
-    }
-}
-
 /// A top-level page. Replaces the old tab strip: OGH uses a rail, and a rail
 /// scales to five destinations without wrapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Page {
+    #[default]
     Dashboard,
     Performance,
     Lighting,
     System,
     About,
-}
-
-impl Default for Page {
-    fn default() -> Self {
-        Page::Dashboard
-    }
 }
 
 impl Page {
@@ -342,10 +332,10 @@ fn install_fonts(ctx: &egui::Context) {
         (Some(ui), Some(num)) => {
             fonts
                 .font_data
-                .insert("omen-ui".to_owned(), FontData::from_owned(ui).into());
+                .insert("omen-ui".to_owned(), FontData::from_owned(ui));
             fonts
                 .font_data
-                .insert("omen-num".to_owned(), FontData::from_owned(num).into());
+                .insert("omen-num".to_owned(), FontData::from_owned(num));
             fonts
                 .families
                 .insert(FontFamily::Name("ui".into()), vec!["omen-ui".to_owned()]);

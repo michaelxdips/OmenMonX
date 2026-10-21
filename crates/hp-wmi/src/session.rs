@@ -240,8 +240,10 @@ unsafe fn variant_from_byte_array(data: &[u8]) -> Result<VARIANT> {
     Ok(std::mem::transmute::<imp::VARIANT, VARIANT>(raw))
 }
 
-unsafe fn put_variant(obj: &IWbemClassObject, name: &str, mut v: VARIANT) -> Result<()> {
-    obj.Put(&BSTR::from(name), 0, &mut v, 0).map_err(Error::Windows)
+unsafe fn put_variant(obj: &IWbemClassObject, name: &str, v: VARIANT) -> Result<()> {
+    // IWbemClassObject::Put takes `*const VARIANT` in this binding, so the value
+    // does not need to be mutable at the call site.
+    obj.Put(&BSTR::from(name), 0, &v, 0).map_err(Error::Windows)
 }
 
 unsafe fn put_u32(obj: &IWbemClassObject, name: &str, val: u32) -> Result<()> {

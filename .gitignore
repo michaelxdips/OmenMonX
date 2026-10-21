@@ -6,3 +6,11 @@ _task_*.ps1
 *.log
 __pycache__/
 *.pyc
+shot-light.png
+shot-monitor.png
+shot2.png
+ui-dash.png
+ui-dash2.png
+ui-elev.png
+ui-light.png
+ui-perf.png

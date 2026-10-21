@@ -163,7 +163,7 @@ mod tests {
     /// wrong thing.
     #[test]
     fn args_with_spaces_are_quoted() {
-        let args = vec!["--install-dir".to_string(), r"C:\Program Files\OmenMon".to_string()];
+        let args = ["--install-dir".to_string(), r"C:\Program Files\OmenMon".to_string()];
         let params = args
             .iter()
             .map(|a| {

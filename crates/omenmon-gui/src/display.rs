@@ -33,12 +33,14 @@ impl Mode {
 }
 
 fn devmode_for(m: Mode) -> DEVMODEW {
-    let mut dm = DEVMODEW::default();
-    dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
-    dm.dmPelsWidth = m.width;
-    dm.dmPelsHeight = m.height;
-    dm.dmDisplayFrequency = m.hz;
-    dm.dmBitsPerPel = m.bits;
+    let mut dm = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        dmPelsWidth: m.width,
+        dmPelsHeight: m.height,
+        dmDisplayFrequency: m.hz,
+        dmBitsPerPel: m.bits,
+        ..Default::default()
+    };
     dm.dmFields =
         windows::Win32::Graphics::Gdi::DM_PELSWIDTH
             | windows::Win32::Graphics::Gdi::DM_PELSHEIGHT
@@ -50,8 +52,10 @@ fn devmode_for(m: Mode) -> DEVMODEW {
 /// The mode the display is currently running.
 pub fn current() -> Option<Mode> {
     unsafe {
-        let mut dm = DEVMODEW::default();
-        dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+        let mut dm = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
         let ok = EnumDisplaySettingsW(
             PCWSTR::null(),
             ENUM_CURRENT_SETTINGS,
@@ -82,8 +86,10 @@ pub fn available_rates() -> Vec<Mode> {
     let mut out: Vec<Mode> = Vec::new();
     let mut i: u32 = 0;
     loop {
-        let mut dm = DEVMODEW::default();
-        dm.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+        let mut dm = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
         let ok = unsafe {
             EnumDisplaySettingsW(
                 PCWSTR::null(),

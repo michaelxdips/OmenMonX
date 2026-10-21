@@ -9,30 +9,37 @@ use eframe::egui::{self, Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2}
 
 use crate::theme::{self, Palette, BODY, LABEL, VALUE};
 
+/// Everything a gauge needs to draw itself.
+///
+/// Grouped into a struct rather than passed as eight positional arguments: the
+/// call sites read as "this is the CPU gauge, this is its value" instead of a row
+/// of floats where two of them could be swapped without a compile error.
+pub struct Gauge<'a> {
+    pub diameter: f32,
+    /// 0.0..=1.0 of the full scale. Clamped, never trusted.
+    pub fraction: f32,
+    /// The big centre number, already formatted.
+    pub centre: &'a str,
+    pub unit: &'a str,
+    pub caption: &'a str,
+    pub colour: Color32,
+}
+
 /// A large circular gauge with an arc, a big centre number and a caption.
 ///
 /// The arc starts at 7 o'clock and sweeps 270 degrees, which is the shape people
 /// read as "dial" rather than "pie". The unfilled track is always drawn so the
 /// gauge has a scale even at zero.
-pub fn gauge(
-    ui: &mut Ui,
-    p: &Palette,
-    diameter: f32,
-    fraction: f32,
-    centre: &str,
-    unit: &str,
-    caption: &str,
-    colour: Color32,
-) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(diameter), Sense::hover());
+pub fn gauge(ui: &mut Ui, g: &Gauge<'_>) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(g.diameter), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return resp;
     }
 
     let painter = ui.painter();
     let c = rect.center();
-    let r = diameter * 0.5 - 9.0;
-    let width = (diameter * 0.062).clamp(5.0, 11.0);
+    let r = g.diameter * 0.5 - 9.0;
+    let width = (g.diameter * 0.062).clamp(5.0, 11.0);
     let start = 135.0_f32.to_radians();
     let sweep = 270.0_f32.to_radians();
 
@@ -40,14 +47,14 @@ pub fn gauge(
     painter.add(egui::Shape::circle_stroke(
         c,
         r,
-        Stroke::new(width, p.tint(p.text, 22)),
+        Stroke::new(width, Color32::from_rgba_unmultiplied(255, 255, 255, 22)),
     ));
     // Arc. A full circle is a special case: `line` with identical endpoints
     // tessellates to nothing, so draw a stroke instead.
-    let frac = fraction.clamp(0.0, 1.0);
+    let frac = g.fraction.clamp(0.0, 1.0);
     if frac > 0.001 {
         if frac >= 0.999 {
-            painter.add(egui::Shape::circle_stroke(c, r, Stroke::new(width, colour)));
+            painter.add(egui::Shape::circle_stroke(c, r, Stroke::new(width, g.colour)));
         } else {
             let steps = 64;
             let pts: Vec<Pos2> = (0..=steps)
@@ -56,20 +63,20 @@ pub fn gauge(
                     Pos2::new(c.x + r * a.cos(), c.y + r * a.sin())
                 })
                 .collect();
-            painter.add(egui::Shape::line(pts, Stroke::new(width, colour)));
+            painter.add(egui::Shape::line(pts, Stroke::new(width, g.colour)));
         }
     }
 
     // Centre readout: value on top, unit beside it, caption below.
-    let val_font = egui::FontId::new(diameter * 0.235, theme::numeric());
-    let unit_font = egui::FontId::new(diameter * 0.085, theme::proportional());
+    let val_font = egui::FontId::new(g.diameter * 0.235, theme::numeric());
+    let unit_font = egui::FontId::new(g.diameter * 0.085, theme::proportional());
     let cap_font = egui::FontId::new(LABEL, theme::proportional());
+    let dim = Color32::from_rgb(0x9A, 0xA0, 0xAC);
 
-    let val_galley = ui.fonts(|f| f.layout_no_wrap(centre.to_owned(), val_font.clone(), colour));
-    let unit_galley = ui.fonts(|f| f.layout_no_wrap(unit.to_owned(), unit_font.clone(), p.dim));
-    let cap_galley = ui.fonts(|f| {
-        f.layout_no_wrap(caption.to_uppercase(), cap_font.clone(), p.dim)
-    });
+    let val_galley = ui.fonts(|f| f.layout_no_wrap(g.centre.to_owned(), val_font, g.colour));
+    let unit_galley = ui.fonts(|f| f.layout_no_wrap(g.unit.to_owned(), unit_font, dim));
+    let cap_galley =
+        ui.fonts(|f| f.layout_no_wrap(g.caption.to_uppercase(), cap_font, dim));
 
     let val_h = val_galley.size().y;
     let unit_w = unit_galley.size().x;
@@ -77,16 +84,16 @@ pub fn gauge(
     let block_w = val_galley.size().x + gap + unit_w;
     let val_pos = Pos2::new(c.x - block_w * 0.5, c.y - val_h * 0.5 - 2.0);
 
-    painter.galley(val_pos, val_galley, colour);
+    painter.galley(val_pos, val_galley, g.colour);
     painter.galley(
         Pos2::new(val_pos.x + block_w - unit_w, val_pos.y + val_h * 0.52),
         unit_galley,
-        p.dim,
+        dim,
     );
     painter.galley(
         Pos2::new(c.x - cap_galley.size().x * 0.5, val_pos.y + val_h + 3.0),
         cap_galley,
-        p.dim,
+        dim,
     );
     resp
 }
@@ -380,8 +387,6 @@ impl Palette {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// The gauge clamps out-of-range fractions instead of drawing a negative or
     /// over-long arc. This is checked on the arithmetic the painter uses.
     #[test]

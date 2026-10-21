@@ -231,6 +231,10 @@ impl Sampler {
                     // byte-exact restore source.
                     let mut pristine_rgb: Option<Vec<u8>> = None;
 
+                    // Tick cadence is expressed as `% N` rather than
+                    // `is_multiple_of`: the counters are a schedule, and the
+                    // modulo reads as one.
+                    #[allow(clippy::manual_is_multiple_of)]
                     while !stop.load(Ordering::Relaxed) {
                         // ---- consume any pending control request first ----
                         let req = request.lock().take();

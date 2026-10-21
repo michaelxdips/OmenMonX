@@ -121,7 +121,7 @@ fn uninstall() -> anyhow::Result<()> {
     println!("{}", "=".repeat(50));
     run(&format!("schtasks /Delete /F /TN {TASK_NAME}"))?;
     let _ = Command::new("schtasks").args(["/Delete", "/F", "/TN", "OmenMonRunner"]).output();
-    run(&format!("reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OmenMon-rs /f"))?;
+    run("reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OmenMon-rs /f")?;
     // remove binaries (best effort)
     for name in ["omenmon.exe", "omenmon-setup.exe", "status.log"] {
         let p = PathBuf::from(INSTALL_DIR).join(name);

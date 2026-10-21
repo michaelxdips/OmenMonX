@@ -489,16 +489,20 @@ impl App {
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if !self.sampler.state.lock().elevated {
-                    if w::primary_button(ui, p, "Restart as administrator", true).clicked() {
-                        match elevate::relaunch_elevated() {
-                            Ok(()) => {
-                                self.persist_window(ui.ctx());
-                                self.sampler.stop();
-                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                            }
-                            Err(e) => self.rate_msg = Some((format!("elevation: {e}"), false)),
+                // The header keeps the elevation offer; the power card repeats it
+                // only where the missing token actually blocks the page, so the
+                // two never appear together.
+                if !self.sampler.state.lock().elevated
+                    && self.ui.page != Page::Performance
+                    && w::primary_button(ui, p, "Restart as administrator", true).clicked()
+                {
+                    match elevate::relaunch_elevated() {
+                        Ok(()) => {
+                            self.persist_window(ui.ctx());
+                            self.sampler.stop();
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
+                        Err(e) => self.rate_msg = Some((format!("elevation: {e}"), false)),
                     }
                 }
             });
@@ -562,13 +566,33 @@ impl App {
                         Some(v) => (format!("{v:.0}"), p.temp(v)),
                         None => ("--".into(), p.faint()),
                     };
-                    w::gauge(ui, p, d, cpu.unwrap_or(0.0) / 110.0, &c_txt, "\u{00b0}C", "CPU", c_col);
+                    w::gauge(
+                        ui,
+                        &w::Gauge {
+                            diameter: d,
+                            fraction: cpu.unwrap_or(0.0) / 110.0,
+                            centre: &c_txt,
+                            unit: "\u{00b0}C",
+                            caption: "CPU",
+                            colour: c_col,
+                        },
+                    );
                     ui.add_space(10.0);
                     let (g_txt, g_col) = match gpu {
                         Some(v) => (format!("{v:.0}"), p.temp(v)),
                         None => ("--".into(), p.faint()),
                     };
-                    w::gauge(ui, p, d, gpu.unwrap_or(0.0) / 110.0, &g_txt, "\u{00b0}C", "GPU", g_col);
+                    w::gauge(
+                        ui,
+                        &w::Gauge {
+                            diameter: d,
+                            fraction: gpu.unwrap_or(0.0) / 110.0,
+                            centre: &g_txt,
+                            unit: "\u{00b0}C",
+                            caption: "GPU",
+                            colour: g_col,
+                        },
+                    );
 
                     ui.add_space(18.0);
                     ui.vertical(|ui| {
@@ -884,10 +908,13 @@ impl App {
                 ui.add_space(12.0);
                 w::card(ui, p, "MEASURED LIMITS", |ui| {
                     for (k, v) in [
-                        ("0x29 accepted range", "5–25 W (8/8 writes)"),
-                        ("above 25 W", "rejected, firmware resets to 25"),
-                        ("effect at 25 W", "3393 MHz under 16-thread load"),
-                        ("effect at 10 W", "3058 / 1840 MHz, 1541 MHz range"),
+                        ("0x29 accepted, brick", "5–65 W PL1, PL4 ≤ 55"),
+                        ("0x29 accepted, USB-C", "5–25 W (PD profile)"),
+                        ("stock on brick", "65 / 55 / 55 W, stable 90 s"),
+                        ("stock on USB-C", "25 / 25 / 25 W"),
+                        ("clock at 65 W", "4425 MHz, 16 threads"),
+                        ("clock at 25 W", "3515 MHz, 910 MHz lower"),
+                        ("reset", "over-limit write → firmware stock"),
                         ("0x2A[0]", "not watts — falls 64→62 under load"),
                     ] {
                         ui.horizontal(|ui| {
@@ -910,12 +937,53 @@ impl App {
                             );
                         });
                     }
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "The ceiling follows the supply. On USB-C the cap can only lower \
+                             the profile; on the brick it is a real 5–65 W control.",
+                        )
+                        .size(LABEL)
+                        .color(p.faint())
+                        .family(theme::proportional()),
+                    );
                 });
             });
         });
     }
 
     fn power_card(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
+        // Without elevation there is no 0x2A block, so there is nothing honest to
+        // show. Say why and offer the fix, rather than drawing a card of dashes.
+        if st.limits.is_none() {
+            w::card(ui, p, "POWER CEILING", |ui| {
+                w::empty(
+                    ui,
+                    p,
+                    "power limits need an elevated token",
+                    Some(if st.elevated {
+                        "the 0x2A block did not answer on this boot"
+                    } else {
+                        "0x29 and 0x2A are admin-only; the rest of the app works without them"
+                    }),
+                );
+                if !st.elevated {
+                    ui.add_space(8.0);
+                    if w::primary_button(ui, p, "Restart as administrator", true).clicked() {
+                        match elevate::relaunch_elevated() {
+                            Ok(()) => {
+                                self.persist_window(ui.ctx());
+                                self.sampler.stop();
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            Err(e) => self.rate_msg = Some((format!("elevation: {e}"), false)),
+                        }
+                    }
+                }
+            });
+            return;
+        }
+
         let cap_now = st.limits.map(|l| l.pl1);
         let ceiling = st
             .limits
@@ -1060,7 +1128,14 @@ impl App {
                 ui.label(
                     egui::RichText::new(match current {
                         Some(t) => format!("firmware reports: {t}"),
-                        None => "firmware status byte is not a known mode".into(),
+                        // Distinguish "the firmware said something unknown" from
+                        // "we could not ask", which is what an unelevated run
+                        // actually is. Showing 0x00 as an unknown mode would blame
+                        // the firmware for our missing token.
+                        None if !st.bios_ok => {
+                            "status unavailable — needs an elevated token".to_string()
+                        }
+                        None => format!("firmware status {status:#04X} is not a known mode"),
                     })
                     .size(LABEL)
                     .color(p.dim)

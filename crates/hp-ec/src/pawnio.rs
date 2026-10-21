@@ -88,7 +88,7 @@ impl PawnIo {
         self.raw_ioctl(CTL_EXECUTE, &full, &mut out_buf)?;
 
         Ok(out_buf
-            .chunks_exact(8)
+            .chunks(8)
             .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
             .collect())
     }
