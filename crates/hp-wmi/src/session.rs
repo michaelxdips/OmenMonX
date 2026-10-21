@@ -1,4 +1,4 @@
-﻿//! Session: raw COM/WMI transport to hpqBIntM, replicating the exact invocation
+//! Session: raw COM/WMI transport to hpqBIntM, replicating the exact invocation
 //! pattern validated live on Victus 8C9C (2026-10):
 //!   - hpqBDataIn built manually with InstanceName (key) + Active properties
 //!   - InData passed as embedded instance object
@@ -58,7 +58,7 @@ impl HpWmi {
         unsafe {
             let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
             if hr.is_err() && hr.0 != 1 {
-                // S_FALSE means already initialized â€” fine.
+                // S_FALSE means already initialized — fine.
                 return Err(Error::ComInit(hr.ok().unwrap_err()));
             }
             let _ = CoInitializeSecurity(

@@ -4,3 +4,5 @@
 _task_*.txt
 _task_*.ps1
 *.log
+__pycache__/
+*.pyc

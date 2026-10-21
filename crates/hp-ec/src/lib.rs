@@ -1,4 +1,4 @@
-﻿//! hp-ec: Embedded Controller access for HP Victus (Insyde firmware).
+//! hp-ec: Embedded Controller access for HP Victus (Insyde firmware).
 //!
 //! Transport: PawnIO (signed kernel driver, https://pawnio.eu) running the
 //! `LpcACPIEC` module, which mediates byte port I/O restricted to ports

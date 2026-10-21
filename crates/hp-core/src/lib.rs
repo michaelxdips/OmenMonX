@@ -1,4 +1,4 @@
-﻿//! hp-core: sensor aggregation, battery health, fan engine, config.
+//! hp-core: sensor aggregation, battery health, fan engine, config.
 
 pub mod battery;
 pub mod sensors;

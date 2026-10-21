@@ -32,7 +32,7 @@ impl Bios {
 
     // ---- System / capability ----
 
-    /// 0x28 GetSystem â€” support flags (fan ctl, extreme mode, GPU switch bits).
+    /// 0x28 GetSystem — support flags (fan ctl, extreme mode, GPU switch bits).
     pub fn get_system(&self) -> Result<Response> {
         self.ok(Request::new(CMD_DEFAULT, 0x28), 128)
     }
@@ -43,19 +43,19 @@ impl Bios {
         r.byte0().ok_or(crate::Error::Shape("no fan count byte"))
     }
 
-    /// 0x2C GetFanType â€” nibbles: 1 CPU, 2 GPU, 3 exhaust, 4 pump, 5 intake.
+    /// 0x2C GetFanType — nibbles: 1 CPU, 2 GPU, 3 exhaust, 4 pump, 5 intake.
     pub fn get_fan_type(&self) -> Result<Response> {
         self.ok(Request::new(CMD_DEFAULT, 0x2C), 128)
     }
 
     // ---- Fans ----
 
-    /// 0x2D GetFanLevel â€” per-fan current level.
+    /// 0x2D GetFanLevel — per-fan current level.
     pub fn get_fan_level(&self) -> Result<Response> {
         self.ok(Request::new(CMD_DEFAULT, 0x2D), 128)
     }
 
-    /// 0x2E SetFanLevel â€” {fan1_level, fan2_level, ...}.
+    /// 0x2E SetFanLevel — {fan1_level, fan2_level, ...}.
     pub fn set_fan_level(&self, levels: &[u8]) -> Result<()> {
         self.ok(Request::with_data(CMD_DEFAULT, 0x2E, levels), 0)?;
         Ok(())
@@ -66,13 +66,13 @@ impl Bios {
         self.ok(Request::new(CMD_DEFAULT, 0x26), 4)
     }
 
-    /// 0x27 SetMaxFan â€” {0 = off, 1 = on} per OmenMon semantics.
+    /// 0x27 SetMaxFan — {0 = off, 1 = on} per OmenMon semantics.
     pub fn set_max_fan(&self, on: bool) -> Result<()> {
         self.ok(Request::with_data(CMD_DEFAULT, 0x27, &[u8::from(on), 0, 0, 0]), 0)?;
         Ok(())
     }
 
-    /// 0x1A SetFanMode â€” e.g. 0x30 default, 0x31 performance, 0x50 cool.
+    /// 0x1A SetFanMode — e.g. 0x30 default, 0x31 performance, 0x50 cool.
     pub fn set_fan_mode(&self, mode: u8) -> Result<()> {
         self.ok(Request::with_data(CMD_DEFAULT, 0x1A, &[0xFF, mode, 0, 0]), 0)?;
         Ok(())
@@ -125,7 +125,7 @@ impl Bios {
         Ok(FanTable::parse(&r.data))
     }
 
-    /// 0x2B GetKbdType â€” informational only.
+    /// 0x2B GetKbdType — informational only.
     ///
     /// **Do not derive the zone count from this.** On board 8C9C it returns
     /// `0x04`, which OMEN Gaming Hub's enum calls "OneZoneWithNumpad", yet the
@@ -138,7 +138,7 @@ impl Bios {
 
     // ---- Temperatures ----
 
-    /// 0x23 GetTemperature â€” requires an input payload (sensor selector).
+    /// 0x23 GetTemperature — requires an input payload (sensor selector).
     /// Candidates validated in M1; {0x01,0,0,0} first.
     pub fn get_temperature(&self, sensor: u8) -> Result<Response> {
         self.ok(Request::with_data(CMD_DEFAULT, 0x23, &[sensor, 0, 0, 0]), 4)
@@ -160,24 +160,24 @@ impl Bios {
         Ok(r.data.iter().any(|&b| b != 0))
     }
 
-    /// Keyboard subtype 2 â€” GetColorTable (128 B: ZoneCount + zones Ã— RGB).
+    /// Keyboard subtype 2 — GetColorTable (128 B: ZoneCount + zones × RGB).
     pub fn get_color_table(&self) -> Result<Response> {
         self.ok(Request::new(CMD_KEYBOARD, 0x02), 128)
     }
 
-    /// Keyboard subtype 3 â€” SetColorTable (full 128 B table).
+    /// Keyboard subtype 3 — SetColorTable (full 128 B table).
     pub fn set_color_table(&self, table: &[u8]) -> Result<()> {
         self.ok(Request::with_data(CMD_KEYBOARD, 0x03, table), 0)?;
         Ok(())
     }
 
-    /// Keyboard subtype 4 â€” GetBacklight (0x64 off, 0xE4 on).
+    /// Keyboard subtype 4 — GetBacklight (0x64 off, 0xE4 on).
     pub fn get_backlight(&self) -> Result<u8> {
         let r = self.ok(Request::new(CMD_KEYBOARD, 0x04), 4)?;
         r.byte0().ok_or(crate::Error::Shape("no backlight byte"))
     }
 
-    /// Keyboard subtype 5 â€” SetBacklight.
+    /// Keyboard subtype 5 — SetBacklight.
     pub fn set_backlight(&self, value: u8) -> Result<()> {
         self.ok(Request::with_data(CMD_KEYBOARD, 0x05, &[value, 0, 0, 0]), 0)?;
         Ok(())
@@ -185,18 +185,18 @@ impl Bios {
 
     // ---- GPU ----
 
-    /// 0x21 GetGpuPower â€” CustomTgp, Ppab, DState, PeakTemp.
+    /// 0x21 GetGpuPower — CustomTgp, Ppab, DState, PeakTemp.
     pub fn get_gpu_power(&self) -> Result<Response> {
         self.ok(Request::new(CMD_DEFAULT, 0x21), 4)
     }
 
-    /// 0x22 SetGpuPower â€” raw 4-byte payload.
+    /// 0x22 SetGpuPower — raw 4-byte payload.
     pub fn set_gpu_power(&self, data: &[u8]) -> Result<()> {
         self.ok(Request::with_data(CMD_DEFAULT, 0x22, data), 0)?;
         Ok(())
     }
 
-    /// Legacy 0x52 GetGpuMode â€” 0 hybrid, 1 discrete, 2 optimus.
+    /// Legacy 0x52 GetGpuMode — 0 hybrid, 1 discrete, 2 optimus.
     pub fn get_gpu_mode(&self) -> Result<Response> {
         self.ok(Request::new(CMD_LEGACY, 0x52), 4)
     }
