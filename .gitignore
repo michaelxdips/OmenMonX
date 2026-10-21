@@ -6,11 +6,7 @@ _task_*.ps1
 *.log
 __pycache__/
 *.pyc
-shot-light.png
-shot-monitor.png
-shot2.png
-ui-dash.png
-ui-dash2.png
-ui-elev.png
-ui-light.png
-ui-perf.png
+
+# Screenshot artefacts from tools/ui. Captures are evidence for a session, not
+# source; regenerate them with tools/ui/shot.ps1 when needed.
+*.png

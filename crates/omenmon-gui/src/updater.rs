@@ -65,13 +65,50 @@ pub struct UpdateCheck {
     pub update_available: bool,
 }
 
-pub fn check() -> anyhow::Result<UpdateCheck> {
-    let rel: GhRelease = ureq::AgentBuilder::new()
+/// Why an update check could not produce a version.
+#[derive(Debug)]
+pub enum CheckError {
+    /// The repository has no published release yet. This is the normal state for a
+    /// project that has not cut a release, and it must not read like a network
+    /// fault: GitHub answers 404 for "no releases", not just for "no repo".
+    NoReleases,
+    /// The network or GitHub API failed for another reason.
+    Other(String),
+}
+
+impl std::error::Error for CheckError {}
+
+impl std::fmt::Display for CheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CheckError::NoReleases => {
+                write!(f, "no published release yet — this build is ahead of any release")
+            }
+            CheckError::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+pub fn check() -> Result<UpdateCheck, CheckError> {
+    let resp = ureq::AgentBuilder::new()
         .user_agent(UA)
         .build()
         .get(LATEST_API)
-        .call()?
-        .into_json()?;
+        .call();
+
+    let rel: GhRelease = match resp {
+        Ok(r) => r
+            .into_json()
+            .map_err(|e| CheckError::Other(format!("malformed release JSON: {e}")))?,
+        // 404 means the repo has no releases (the repo itself exists). Reporting
+        // the raw "status code 404" told the user nothing actionable.
+        Err(ureq::Error::Status(404, _)) => return Err(CheckError::NoReleases),
+        Err(ureq::Error::Status(code, _)) => {
+            return Err(CheckError::Other(format!("GitHub returned status {code}")))
+        }
+        Err(e) => return Err(CheckError::Other(format!("network error: {e}"))),
+    };
+
     let latest = rel.tag_name.trim_start_matches('v').to_string();
     let newer = is_newer(&latest, &current_version());
     // prefer the full installer payload (bundles CLI + GUI + setup)
@@ -248,5 +285,39 @@ impl UpdateHandle {
                 h.0.lock().busy = false;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "No releases" must not read like a network fault. GitHub answers 404 for a
+    /// repository that has no releases, so the message has to say what is actually
+    /// true rather than echoing a status code.
+    #[test]
+    fn no_releases_message_is_actionable() {
+        let msg = CheckError::NoReleases.to_string();
+        assert!(msg.contains("no published release"), "got: {msg}");
+        assert!(!msg.contains("404"), "a status code is not an explanation");
+    }
+
+    /// The other error variant passes its detail through unchanged, so a genuine
+    /// network failure still names the failure.
+    #[test]
+    fn other_errors_keep_their_detail() {
+        assert_eq!(CheckError::Other("timeout".into()).to_string(), "timeout");
+    }
+
+    /// Version comparison drives whether an update is offered at all.
+    #[test]
+    fn newer_detection() {
+        assert!(is_newer("0.2.1", "0.2.0"));
+        assert!(is_newer("0.3", "0.2.9"));
+        assert!(is_newer("1.0.0", "0.9.9"));
+        assert!(!is_newer("0.2.0", "0.2.0"));
+        assert!(!is_newer("0.1.9", "0.2.0"));
+        // A tag written as v1.2.3 must compare the same as 1.2.3.
+        assert!(is_newer("v0.3.0", "0.2.0"));
     }
 }

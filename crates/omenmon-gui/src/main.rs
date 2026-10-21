@@ -1716,7 +1716,6 @@ impl App {
                     for (cap, state, note) in CAPABILITIES {
                         let (c, glyph) = match *state {
                             Cap::Works => (p.green, "\u{2713}"),
-                            Cap::Partial => (p.amber, "\u{2248}"),
                             Cap::Dead => (p.red, "\u{2717}"),
                         };
                         ui.horizontal(|ui| {
@@ -1747,7 +1746,11 @@ impl App {
 /// Capability matrix. Every row is a measurement from REPORT-2026-10-21.md, and
 /// nothing here is aspirational: a row that says "dead" had a test that failed.
 const CAPABILITIES: &[(&str, Cap, &str)] = &[
-    ("CPU power cap 5–25 W", Cap::Works, "0x29 verified by clock outcome, 1541 MHz range"),
+    (
+        "CPU power cap",
+        Cap::Works,
+        "5–65 W on the 230 W brick, 5–25 W on USB-C; verified by clock outcome",
+    ),
     ("Thermal profile", Cap::Works, "0x1A V1 remap, status read back from 0x28[8]"),
     ("Keyboard RGB", Cap::Works, "0x20009 subtype 2/3, byte-exact RMW restore"),
     ("BIOS settings write", Cap::Works, "instance-path SetBIOSSetting, rc table calibrated"),
@@ -1757,13 +1760,11 @@ const CAPABILITIES: &[(&str, Cap, &str)] = &[
     ("Battery charge limit", Cap::Dead, "Battery Care Function returns rc 5 for all 27 encodings"),
     ("GPU mode switch", Cap::Dead, "0x52 returns BIOS err 5"),
     ("BIOS undervolt / OC", Cap::Dead, "0x35 returns WMI err 31; 0x28[6] = 0"),
-    ("Above 25 W", Cap::Partial, "ceiling untested on the 230 W brick — report §8.5"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cap {
     Works,
-    Partial,
     Dead,
 }
 
