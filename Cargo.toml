@@ -5,6 +5,7 @@ members = [
     "crates/hp-ec",
     "crates/hp-core",
     "crates/omenmon-cli",
+    "crates/omenmon-gui",
 ]
 
 [workspace.package]

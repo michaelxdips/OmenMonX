@@ -2,6 +2,12 @@ use clap::{Parser, Subcommand};
 use hp_wmi::Bios;
 use hp_core as _;
 
+mod daemon {
+    #[path = "../daemon_bin.rs"]
+    pub mod daemon_impl;
+    pub use daemon_impl::run;
+}
+
 #[derive(Parser)]
 #[command(name = "omenmon", version, about = "Victus/Omen hardware control — Rust edition")]
 struct Cli {
@@ -21,6 +27,8 @@ enum Command {
     Battery,
     /// Live status one-shot (temps + fan + battery summary)
     Status,
+    /// Long-running daemon (single-instance, battery alerts, curve loop)
+    Daemon,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -31,6 +39,7 @@ fn main() -> anyhow::Result<()> {
         Command::Fans => fans()?,
         Command::Battery => battery()?,
         Command::Status => status()?,
+        Command::Daemon => daemon::run()?,
     }
     Ok(())
 }

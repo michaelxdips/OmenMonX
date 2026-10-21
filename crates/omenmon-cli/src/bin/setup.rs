@@ -35,13 +35,40 @@ fn install() -> anyhow::Result<()> {
 
     // 1. copy binaries
     std::fs::create_dir_all(INSTALL_DIR)?;
-    for name in ["omenmon.exe"] {
+    for name in ["omenmon.exe", "omenmon-gui.exe", "omenmon-setup.exe"] {
         let src = exe_dir().join(name);
         if src.exists() {
             std::fs::copy(&src, PathBuf::from(INSTALL_DIR).join(name))?;
             println!("installed  {INSTALL_DIR}\\{name}");
         } else {
             println!("skipped    {name} (not found next to installer)");
+        }
+    }
+
+    // 1b. GUI autostart shortcut for the current user (Startup folder)
+    let startup = std::env::var("APPDATA")
+        .map(|a| PathBuf::from(a).join("Microsoft\\Windows\\Start Menu\\Programs\\Startup"))
+        .ok();
+    if let Some(dir) = startup {
+        let gui = PathBuf::from(INSTALL_DIR).join("omenmon-gui.exe");
+        if gui.exists() {
+            std::fs::create_dir_all(&dir)?;
+            let lnk = dir.join("OmenMon.lnk");
+            let ps = format!(
+                "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{}'); \
+                 $s.TargetPath = '{}'; $s.WorkingDirectory = '{}'; $s.Save()",
+                lnk.display(),
+                gui.display(),
+                INSTALL_DIR
+            );
+            let out = Command::new("powershell")
+                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
+                .output()?;
+            if out.status.success() {
+                println!("autostart  GUI shortcut -> {}", lnk.display());
+            } else {
+                println!("autostart  GUI shortcut FAILED (non-fatal)");
+            }
         }
     }
 
