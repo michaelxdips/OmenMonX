@@ -12,11 +12,11 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Wmi::IWbemLocator;
 use windows::Win32::System::Ole::{
-    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayGetElement, SafeArrayGetUBound,
+    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayGetUBound,
     SafeArrayUnaccessData,
 };
 
-use windows::Win32::System::Variant::{VT_ARRAY, VT_UI1};
+use windows::Win32::System::Variant::VT_UI1;
 use windows::Win32::System::Wmi::{
     IWbemClassObject, IWbemContext, IWbemServices, WBEM_FLAG_FORWARD_ONLY,
     WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_INFINITE, WbemContext,
@@ -27,7 +27,6 @@ use crate::payload::{Request, Response};
 
 const NAMESPACE: &str = r"root\wmi";
 const METHOD_CLASS: &str = "hpqBIntM";
-const METHOD_INSTANCE: &str = r"ACPI\PNP0C14\0_0";
 const DATA_IN_CLASS: &str = "hpqBDataIn";
 
 /// Out-method name per buffer size, matching OmenMon's BIOS_METHOD table.
@@ -312,47 +311,3 @@ unsafe fn get_byte_array(obj: &IWbemClassObject, name: &str) -> Result<Vec<u8>> 
     SafeArrayUnaccessData(sa_win).map_err(Error::Windows)?;
     Ok(out)
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-unsafe fn put_str(obj: &IWbemClassObject, name: &str, val: &str) -> Result<()> {
-    put_variant(obj, name, VARIANT::from(val))
-}
-
-unsafe fn put_bool(obj: &IWbemClassObject, name: &str, val: bool) -> Result<()> {
-    put_variant(obj, name, VARIANT::from(val))
-}
-
-
-
-
-
-
-
-
-
-
-
-

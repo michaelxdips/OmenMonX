@@ -4,8 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const MUTEX_NAME: &str = "OmenMonDaemonSingleInstance"; // local (session) mutex
-
 fn log_dir() -> std::path::PathBuf {
     std::env::var("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
@@ -31,7 +29,7 @@ impl InstanceGuard {
     fn acquire() -> anyhow::Result<Self> {
         let path = log_dir().join("daemon.lock");
         if let Ok(txt) = std::fs::read_to_string(&path) {
-            if let Some(pid) = txt.trim().parse::<u32>().ok() {
+            if let Ok(pid) = txt.trim().parse::<u32>() {
                 // stale check: is that pid alive?
                 let alive = std::process::Command::new("tasklist")
                     .args(["/FI", &format!("PID eq {pid}"), "/NH"])

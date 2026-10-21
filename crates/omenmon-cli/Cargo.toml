@@ -98,6 +98,31 @@ path = "src/bin/pl_forma_confirm.rs"
 required-features = ["probes"]
 
 [[bin]]
+name = "pl_outcome"
+path = "src/bin/pl_outcome.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "supply_probe"
+path = "src/bin/supply_probe.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "pl_model"
+path = "src/bin/pl_model.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "pl_sweep"
+path = "src/bin/pl_sweep.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "pl_write"
+path = "src/bin/pl_write.rs"
+required-features = ["probes"]
+
+[[bin]]
 name = "pl_range"
 path = "src/bin/pl_range.rs"
 required-features = ["probes"]

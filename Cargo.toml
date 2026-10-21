@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Michael"]
@@ -29,7 +29,11 @@ windows = { version = "0.58", features = [
     "Win32_System_IO",
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_System_Rpc",
-    "Win32_System_Variant",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.58"
 thiserror = "2"
@@ -45,4 +49,3 @@ clap = { version = "4", features = ["derive"] }
 opt-level = 3
 lto = true
 strip = true
-

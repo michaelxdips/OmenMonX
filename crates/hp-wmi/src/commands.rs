@@ -219,22 +219,65 @@ impl Bios {
         Ok(CpuPowerLimits::from_block(&r.data))
     }
 
-    /// 0x29 SetPowerLimit — writes PL1/PL2 into 0x2A[2..4].
+    /// 0x29 SetPowerLimit — writes the CPU ceiling.
     ///
-    /// Byte order is `{pl2, pl1, 0xFF, 0xFF}` — **PL2 first**. This is the order
-    /// OMEN Gaming Hub's `PowerControlBase.SetPowerLimit` compiles to; getting it
-    /// backwards makes the write look like a silent no-op.
+    /// **Payload is `{pl1, pl4, 0xFF, 0xFF}`.** Byte 0 sets PL1 and, through the
+    /// firmware's own rule, PL2 = min(pl1, PL2_max); byte 1 sets PL4.
     ///
-    /// The board clamps at [`CpuPowerLimits::MAX_WATTS`]. Values above that are
-    /// rejected and the firmware resets the field to the maximum, so callers are
-    /// clamped here rather than silently ignored.
-    pub fn set_power_limit(&self, watts: u8) -> Result<u8> {
-        let w = watts.clamp(CpuPowerLimits::MIN_WATTS, CpuPowerLimits::MAX_WATTS);
+    /// This ordering was corrected on 2026-10-21 with the 230 W brick attached.
+    /// The previously documented `{pl2, pl1, ...}` was indistinguishable on USB-C
+    /// PD, where every field's ceiling is 25 W and any ordering produces
+    /// 25/25/25. On the brick the two ceilings differ (PL1 65, PL4 55), which is
+    /// what exposed the error: `{60, 30}` yields 60/55/30, so byte 0 is the PL1
+    /// ceiling and byte 1 is PL4.
+    ///
+    /// The board clamps byte 0 at [`CpuPowerLimits::MAX_PL1`] and byte 1 at
+    /// [`CpuPowerLimits::MAX_PL4`]; anything above is rejected and the firmware
+    /// restores its stock block for the current supply. Callers are clamped here
+    /// so a request can never be silently discarded.
+    ///
+    /// To restore the firmware's own values, use [`Bios::reset_power_limits`]
+    /// rather than writing a guess.
+    pub fn set_power_limit(&self, pl1: u8) -> Result<u8> {
+        let w = pl1.clamp(CpuPowerLimits::MIN_WATTS, CpuPowerLimits::MAX_PL1);
+        // PL4 tracks PL1 up to its own, lower ceiling. Writing PL1 alone is the
+        // "one number" form the UI exposes.
+        let pl4 = w.min(CpuPowerLimits::MAX_PL4);
         self.ok(
-            Request::with_data(CMD_DEFAULT, 0x29, &[w, w, 0xFF, 0xFF]),
+            Request::with_data(CMD_DEFAULT, 0x29, &[w, pl4, 0xFF, 0xFF]),
             0,
         )?;
         Ok(w)
+    }
+
+    /// 0x29 with independent PL1 and PL4, clamped to their separate ceilings.
+    ///
+    /// Prefer [`Bios::set_power_limit`] unless PL4 genuinely needs to differ.
+    pub fn set_power_limit_pair(&self, pl1: u8, pl4: u8) -> Result<(u8, u8)> {
+        let pl1 = pl1.clamp(CpuPowerLimits::MIN_WATTS, CpuPowerLimits::MAX_PL1);
+        let pl4 = pl4.clamp(CpuPowerLimits::MIN_WATTS, CpuPowerLimits::MAX_PL4);
+        self.ok(
+            Request::with_data(CMD_DEFAULT, 0x29, &[pl1, pl4, 0xFF, 0xFF]),
+            0,
+        )?;
+        Ok((pl1, pl4))
+    }
+
+    /// Restore the firmware's own power block by sending an over-limit value.
+    ///
+    /// This is the only reset that is correct on **both** supplies. The firmware
+    /// rejects the write and re-applies its stock block, which is 65/55/55 on the
+    /// 230 W brick and 25/25/25 on USB-C PD. Verified 2026-10-21: after the reset
+    /// the block matched the pre-test stock block byte-for-byte.
+    ///
+    /// Do not replace this with `set_power_limit(25)`: on a brick that pins the
+    /// machine to 25 W, which is exactly the bug this project exists to avoid.
+    pub fn reset_power_limits(&self) -> Result<()> {
+        self.ok(
+            Request::with_data(CMD_DEFAULT, 0x29, &[0xFE, 0xFE, 0xFF, 0xFF]),
+            0,
+        )?;
+        Ok(())
     }
 
     /// 0x29 SetConcurrentTdp — writes the WithGpu / concurrent-TDP field at 0x2A[7].
@@ -540,9 +583,51 @@ pub struct CpuPowerLimits {
 impl CpuPowerLimits {
     /// Lowest limit this board accepts.
     pub const MIN_WATTS: u8 = 5;
-    /// Highest limit this board accepts. Values above this are rejected and the
-    /// firmware resets the field to this value.
-    pub const MAX_WATTS: u8 = 25;
+    /// Highest **PL1** this board accepts with the 230 W brick attached.
+    ///
+    /// Supply-dependent: 25 W on USB-C PD, 65 W on the 230 W brick. Use
+    /// [`CpuPowerLimits::pl1_ceiling`] to pick the right one at runtime rather
+    /// than assuming either.
+    pub const MAX_PL1: u8 = 65;
+    /// Highest **PL4** this board accepts on the brick.
+    pub const MAX_PL4: u8 = 55;
+    /// The USB-C PD ceilings, kept as named constants because the difference
+    /// between them and the brick values is the whole story of report §8.5.
+    pub const PD_MAX_PL1: u8 = 25;
+    pub const PD_MAX_PL4: u8 = 25;
+
+    /// The PL1 ceiling for the supply in use, inferred from the stock block.
+    ///
+    /// There is no clean "which adapter" flag: `0x28.DefaultPL4` reads 190 W on
+    /// both supplies and Legacy `0x0F` AdapterStatus reads 1 on both. The stock
+    /// PL1 itself is the reliable discriminator — the firmware writes 65 on the
+    /// brick and 25 on USB-C PD — so this reports the ceiling that matches the
+    /// block it was parsed from.
+    ///
+    /// A block whose PL1 is already below the PD ceiling is treated as USB-C:
+    /// that is the conservative choice, because it keeps the slider from
+    /// offering a value the current supply may refuse.
+    pub fn pl1_ceiling(&self) -> u8 {
+        if self.pl1 > Self::PD_MAX_PL1 {
+            Self::MAX_PL1
+        } else {
+            Self::PD_MAX_PL1
+        }
+    }
+
+    /// The PL4 ceiling for the supply in use.
+    pub fn pl4_ceiling(&self) -> u8 {
+        if self.pl1 > Self::PD_MAX_PL1 {
+            Self::MAX_PL4
+        } else {
+            Self::PD_MAX_PL4
+        }
+    }
+
+    /// True when the block looks like the high-power brick profile.
+    pub fn on_brick(&self) -> bool {
+        self.pl1 > Self::PD_MAX_PL1
+    }
 
     fn from_block(data: &[u8]) -> Self {
         let at = |i: usize| data.get(i).copied().unwrap_or(0);
@@ -596,35 +681,87 @@ mod tests {
         assert!(!l.is_plausible());
     }
 
-    /// The accepted window on 8C9C. Anything above 25 W is rejected by firmware
-    /// and reset to 25, so the API must clamp rather than pass it through.
+    /// The accepted window. Supply-dependent, so both profiles are pinned.
     #[test]
     fn power_limit_window() {
         assert_eq!(CpuPowerLimits::MIN_WATTS, 5);
-        assert_eq!(CpuPowerLimits::MAX_WATTS, 25);
-        let clamp = |w: u8| w.clamp(CpuPowerLimits::MIN_WATTS, CpuPowerLimits::MAX_WATTS);
+        assert_eq!(CpuPowerLimits::MAX_PL1, 65);
+        assert_eq!(CpuPowerLimits::MAX_PL4, 55);
+        assert_eq!(CpuPowerLimits::PD_MAX_PL1, 25);
+        assert_eq!(CpuPowerLimits::PD_MAX_PL4, 25);
+
+        let clamp = |w: u8| w.clamp(CpuPowerLimits::MIN_WATTS, CpuPowerLimits::MAX_PL1);
         assert_eq!(clamp(1), 5);
-        assert_eq!(clamp(5), 5);
-        assert_eq!(clamp(20), 20);
         assert_eq!(clamp(25), 25);
-        assert_eq!(clamp(26), 25);
-        assert_eq!(clamp(45), 25);
+        assert_eq!(clamp(50), 50);
+        assert_eq!(clamp(65), 65);
+        assert_eq!(clamp(66), 65);
+        assert_eq!(clamp(100), 65);
     }
 
-    /// Lock in the wire byte order. `{pl2, pl1, 0xFF, 0xFF}` — PL2 first.
-    /// Reversing these two bytes is what made the command look like a no-op.
+    /// Lock in the corrected wire order. Byte 0 is PL1, byte 1 is PL4.
+    ///
+    /// This test exists because the previous `{pl2, pl1}` order was wrong for
+    /// months without being detectable: on USB-C every ceiling is 25 W, so any
+    /// byte order produced the same block. The brick exposed it.
     #[test]
     fn power_limit_payload_order() {
-        let pl2 = 18u8;
-        let pl1 = 22u8;
-        let payload = [pl2, pl1, 0xFF, 0xFF];
-        assert_eq!(payload[0], 18, "byte 0 must be PL2");
-        assert_eq!(payload[1], 22, "byte 1 must be PL1");
-        assert_eq!(payload[2], 0xFF);
-        assert_eq!(payload[3], 0xFF);
-        // Same-value form, as used by set_power_limit:
-        let w = 20u8;
-        assert_eq!([w, w, 0xFF, 0xFF], [20, 20, 0xFF, 0xFF]);
+        let pl1 = 60u8;
+        let pl4 = 30u8;
+        let payload = [pl1, pl4, 0xFF, 0xFF];
+        assert_eq!(payload[0], 60, "byte 0 must be PL1");
+        assert_eq!(payload[1], 30, "byte 1 must be PL4");
+        assert_eq!(&payload[2..], &[0xFF, 0xFF]);
+
+        // The one-number form sets PL4 to min(pl1, MAX_PL4).
+        for (pl1, expect_pl4) in [(10u8, 10u8), (50, 50), (55, 55), (60, 55), (65, 55)] {
+            let pl4 = pl1.min(CpuPowerLimits::MAX_PL4);
+            assert_eq!(pl4, expect_pl4, "pl1={pl1}");
+        }
+    }
+
+    /// The reset payload must be out of range, or it would set a real limit
+    /// instead of triggering the firmware's stock restore.
+    #[test]
+    fn reset_payload_is_out_of_range() {
+        let reset = [0xFEu8, 0xFE, 0xFF, 0xFF];
+        assert!(reset[0] > CpuPowerLimits::MAX_PL1, "must exceed PL1 ceiling");
+        assert!(reset[1] > CpuPowerLimits::MAX_PL4, "must exceed PL4 ceiling");
+    }
+
+    /// Ceiling inference from real blocks captured on both supplies.
+    #[test]
+    fn ceiling_inferred_from_real_blocks() {
+        // Brick, captured 2026-10-21: PL1=65 PL2=55 PL4=55 GPU=30.
+        let mut brick = [0u8; 128];
+        brick[2] = 65;
+        brick[3] = 55;
+        brick[4] = 55;
+        brick[7] = 30;
+        let b = CpuPowerLimits::from_block(&brick);
+        assert!(b.on_brick(), "65 W stock PL1 means the brick");
+        assert_eq!(b.pl1_ceiling(), 65);
+        assert_eq!(b.pl4_ceiling(), 55);
+
+        // USB-C, captured earlier: PL1=PL2=PL4=25.
+        let mut usbc = [0u8; 128];
+        usbc[2] = 25;
+        usbc[3] = 25;
+        usbc[4] = 25;
+        usbc[7] = 35;
+        let u = CpuPowerLimits::from_block(&usbc);
+        assert!(!u.on_brick());
+        assert_eq!(u.pl1_ceiling(), 25);
+        assert_eq!(u.pl4_ceiling(), 25);
+
+        // A throttled brick block (someone wrote 20 W) must not be mistaken for
+        // USB-C and must not offer 65 W back to a supply that may not have it.
+        let mut throttled = [0u8; 128];
+        throttled[2] = 20;
+        throttled[3] = 20;
+        throttled[4] = 20;
+        let t = CpuPowerLimits::from_block(&throttled);
+        assert_eq!(t.pl1_ceiling(), 25, "conservative when the block is already low");
     }
 
     /// Decode the real 0x28 capture from board 8C9C and check every bit against

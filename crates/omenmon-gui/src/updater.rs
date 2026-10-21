@@ -10,8 +10,6 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub const REPO_OWNER: &str = "michaelxdips";
-pub const REPO_NAME: &str = "OmenMonX";
 const LATEST_API: &str = "https://api.github.com/repos/michaelxdips/OmenMonX/releases/latest";
 const UA: &str = concat!("OmenMon-rs/", env!("CARGO_PKG_VERSION"));
 
@@ -60,7 +58,6 @@ struct GhRelease {
 
 #[derive(Debug, Clone)]
 pub struct UpdateCheck {
-    pub current: String,
     pub latest: String,
     pub asset_url: Option<String>,
     pub asset_name: Option<String>,
@@ -86,7 +83,6 @@ pub fn check() -> anyhow::Result<UpdateCheck> {
         .filter(|_| newer)
         .cloned();
     Ok(UpdateCheck {
-        current: current_version(),
         latest,
         asset_url: asset.as_ref().map(|a| a.browser_download_url.clone()),
         asset_name: asset.as_ref().map(|a| a.name.clone()),

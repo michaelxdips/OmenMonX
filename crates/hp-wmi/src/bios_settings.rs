@@ -69,6 +69,21 @@ impl SetResult {
     pub fn is_ok(self) -> bool {
         matches!(self, SetResult::Accepted | SetResult::AcceptedNeedsReboot)
     }
+
+    /// The raw `rc` the firmware returned, for display.
+    ///
+    /// The UI shows this next to every write. "accepted" alone is not enough
+    /// evidence: rc 5 and rc 0 look identical in OMEN Gaming Hub, and that is
+    /// exactly the ambiguity this project exists to remove.
+    pub fn code(self) -> u32 {
+        match self {
+            SetResult::Accepted => 0,
+            SetResult::UnknownSetting => 1,
+            SetResult::ValueRejected => 5,
+            SetResult::AcceptedNeedsReboot => 6,
+            SetResult::Other(c) => c,
+        }
+    }
 }
 
 impl fmt::Display for SetResult {
@@ -167,7 +182,11 @@ impl BiosSettings {
             loop {
                 let mut objs = [None; 1];
                 let mut returned = 0;
-                enumerator.Next(WBEM_INFINITE, &mut objs, &mut returned).ok();
+                // Without the instance path every write returns rc 5, so a
+                // silent failure here would look like a permissions wall.
+                enumerator
+                    .Next(WBEM_INFINITE, &mut objs, &mut returned)
+                    .ok()?;
                 if returned == 0 {
                     break;
                 }
@@ -214,7 +233,12 @@ impl BiosSettings {
                 loop {
                     let mut objs = [None; 1];
                     let mut returned = 0;
-                    enumerator.Next(WBEM_INFINITE, &mut objs, &mut returned).ok();
+                    // A failure here must not be swallowed: `returned` stays 0
+                    // and the loop would exit with a silently truncated list,
+                    // which reads exactly like "this firmware has fewer settings".
+                    enumerator
+                        .Next(WBEM_INFINITE, &mut objs, &mut returned)
+                        .ok()?;
                     if returned == 0 {
                         break;
                     }
@@ -268,14 +292,7 @@ impl BiosSettings {
                 )
             })?;
 
-            let mut in_params: Option<IWbemClassObject> = None;
-            in_params = Some(in_sig.SpawnInstance(0)?);
-            let in_params = in_params.ok_or_else(|| {
-                windows::core::Error::new(
-                    windows::Win32::Foundation::E_FAIL,
-                    "could not spawn in-params",
-                )
-            })?;
+            let in_params = in_sig.SpawnInstance(0)?;
 
             put_string(&in_params, "Name", name);
             put_string(&in_params, "Password", "");
@@ -452,5 +469,18 @@ mod tests {
             SetResult::from_code(5),
             "unknown-name and value-rejected must stay distinguishable"
         );
+    }
+
+    /// `code()` is the inverse of `from_code()` for every known code, so the
+    /// number shown in the UI is the number the firmware sent.
+    #[test]
+    fn code_roundtrips_from_code() {
+        for raw in [0u32, 1, 5, 6, 9, 0xFFFF] {
+            assert_eq!(
+                SetResult::from_code(raw).code(),
+                raw,
+                "rc {raw} must survive the decode/encode round trip"
+            );
+        }
     }
 }

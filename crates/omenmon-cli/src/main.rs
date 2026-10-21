@@ -199,7 +199,7 @@ fn status() -> anyhow::Result<()> {
 }
 
 fn power() -> anyhow::Result<()> {
-    use hp_wmi::payload::{Request, CMD_DEFAULT};
+    use hp_wmi::CpuPowerLimits;
     let b = bios()?;
     println!("omenmon power - CPU power limits (verified 2026-10-21)");
     println!("{}", "=".repeat(52));
@@ -216,30 +216,52 @@ fn power() -> anyhow::Result<()> {
     println!("PL4 (peak):     {:>3} W", limits.pl4);
     println!("With GPU:       {:>3} W", limits.pl_with_gpu);
     println!(
-        "Writable range: {}..{} W  (firmware clamps above {})",
-        hp_wmi::CpuPowerLimits::MIN_WATTS,
-        hp_wmi::CpuPowerLimits::MAX_WATTS,
-        hp_wmi::CpuPowerLimits::MAX_WATTS
+        "Supply:         {}",
+        if limits.on_brick() {
+            "230 W brick profile (PL1 ceiling 65 W)"
+        } else {
+            "USB-C PD profile (PL1 ceiling 25 W)"
+        }
     );
+    println!(
+        "Writable range: {}..{} W PL1, PL4 up to {} W  (firmware clamps above)",
+        CpuPowerLimits::MIN_WATTS,
+        limits.pl1_ceiling(),
+        limits.pl4_ceiling()
+    );
+    println!("Restore stock:  writes an over-limit value; the firmware re-applies its own block");
 
     if let Ok(io) = hp_ec::ecio::EcIo::connect() {
         if let Ok(page) = io.with_lock(2000, |io| hp_ec::eram::Eram::new(io).read_range(0xC6, 3)) {
-            println!("\nEC 0xC6..C8:    {} {} {}  (static)", page[0], page[1], page[2]);
+            println!("\nEC 0xC6..C8:    {} {} {}  (not a supply flag: drifts on both)", page[0], page[1], page[2]);
         }
     }
     println!("\nNote: 0x2A is a settings block. It is NOT instantaneous package power.");
     Ok(())
 }
 
-/// Set the CPU power cap. Clamped to the verified 5..25 W window.
+/// Set the CPU power cap, clamped to the ceiling the current supply allows.
+///
+/// The ceiling is read from the firmware first, so the same command is correct on
+/// USB-C PD (25 W) and on the 230 W brick (65 W). Clamping to a constant is what
+/// made an earlier build throttle a brick-powered machine to 25 W.
 fn power_cap(watts: u8) -> anyhow::Result<()> {
+    use hp_wmi::CpuPowerLimits;
     let b = bios()?;
+
+    // Read the block first: it carries the supply profile.
+    let before = b.get_cpu_power()?;
+    let ceiling = before.pl1_ceiling();
+    if !before.is_plausible() {
+        anyhow::bail!("0x2A returned no plausible limits; refusing to write blind");
+    }
+
     let applied = b.set_power_limit(watts)?;
     if applied != watts {
         println!(
-            "requested {watts} W -> clamped to {applied} W (board accepts {}..{} W)",
-            hp_wmi::CpuPowerLimits::MIN_WATTS,
-            hp_wmi::CpuPowerLimits::MAX_WATTS
+            "requested {watts} W -> clamped to {applied} W (this supply accepts {}..{} W)",
+            CpuPowerLimits::MIN_WATTS,
+            ceiling
         );
     }
     // Verify by readback: the firmware is the authority, not our request.
@@ -275,10 +297,24 @@ fn apply_saved() -> anyhow::Result<()> {
     let mut did_anything = false;
 
     if let Some(w) = cfg.power_cap_watts {
+        // The saved value was chosen on whatever supply was connected then. On a
+        // different supply the ceiling moves, so say so rather than clamping in
+        // silence: a 65 W preference re-applied on USB-C would quietly become 25.
+        let before = b.get_cpu_power()?;
+        let ceiling = before.pl1_ceiling();
+        if w > ceiling {
+            println!(
+                "power cap: saved {w} W exceeds this supply's {ceiling} W ceiling; \
+                 the firmware will hold {ceiling} W"
+            );
+        }
         let applied = b.set_power_limit(w)?;
         std::thread::sleep(std::time::Duration::from_millis(600));
         let after = b.get_cpu_power()?;
-        println!("power cap: requested {w} W -> firmware holds {} W", after.pl1);
+        println!(
+            "power cap: requested {w} W -> firmware holds {} W (supply ceiling {ceiling} W)",
+            after.pl1
+        );
         if after.pl1 != applied {
             println!("  warning: firmware did not hold the requested value");
         }
@@ -307,13 +343,29 @@ fn apply_saved() -> anyhow::Result<()> {
 }
 
 /// Clear the saved preferences and put the firmware back to its own defaults.
+///
+/// The power block is restored by writing an over-limit value, which makes the
+/// firmware re-apply **its own** stock block. That is 65/55/55 on the 230 W brick
+/// and 25/25/25 on USB-C PD, and it is the only restore that is correct on both.
+/// Writing a hardcoded 25 W here was a real bug: on a brick it left the machine
+/// throttled at 25 W and reported success.
 fn restore_defaults() -> anyhow::Result<()> {
     let b = bios()?;
-    let applied = b.set_power_limit(hp_wmi::CpuPowerLimits::MAX_WATTS)?;
+    let before = b.get_cpu_power()?;
+    b.reset_power_limits()?;
     b.set_fan_mode(hp_wmi::ThermalMode::Balanced.code())?;
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    std::thread::sleep(std::time::Duration::from_millis(800));
     let after = b.get_cpu_power()?;
-    println!("power cap: {applied} W (firmware maximum) -> holds {} W", after.pl1);
+    println!(
+        "power cap: firmware stock block restored -> PL1={} PL2={} PL4={} W",
+        after.pl1, after.pl2, after.pl4
+    );
+    if after.pl1 != before.pl1 {
+        println!(
+            "  (was PL1={} W before the reset; the firmware chose {})",
+            before.pl1, after.pl1
+        );
+    }
     println!("thermal: balanced");
     let mut cfg = hp_core::Config::load();
     cfg.set_power_cap(None);
@@ -366,8 +418,11 @@ fn bios_settings(name: Option<&str>, set: Option<&str>) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e} (elevated run required)"))?;
 
     match (name, set) {
+        // `--set` without a name is a usage error, not a list request. Matching
+        // this before the bare `(None, _)` arm is what makes the error reachable.
+        (None, Some(_)) => anyhow::bail!("--set needs a setting name"),
         // List everything.
-        (None, _) => {
+        (None, None) => {
             let all = s.list().map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("BIOS settings ({} entries)", all.len());
             println!("{}", "=".repeat(64));
@@ -434,7 +489,6 @@ fn bios_settings(name: Option<&str>, set: Option<&str>) -> anyhow::Result<()> {
                 }
             }
         }
-        (None, Some(_)) => anyhow::bail!("--set needs a setting name"),
     }
     Ok(())
 }
@@ -488,7 +542,6 @@ fn thermal(mode: Option<&str>) -> anyhow::Result<()> {
 }
 
 fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
-    use hp_wmi::payload::{Request, CMD_KEYBOARD};
     let b = bios()?;
     match (zone, color) {
         (None, _) => {

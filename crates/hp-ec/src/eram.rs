@@ -22,23 +22,6 @@ impl<'a> Eram<'a> {
         Self { io }
     }
 
-    fn spin_status(&self, mask: u8, want_clear: bool) -> Result<Option<u8>> {
-        for _ in 0..SPIN_MAX {
-            let st = self.io.port_read(EC_CMD)?;
-            let busy = (st & mask) != 0;
-            if busy == !want_clear && busy == false || (!busy) == want_clear {
-                return Ok(Some(st));
-            }
-            if want_clear && (st & mask) == 0 {
-                return Ok(Some(st));
-            }
-            if !want_clear && (st & mask) != 0 {
-                return Ok(Some(st));
-            }
-        }
-        Ok(None)
-    }
-
     fn wait_ibf_clear(&self) -> Result<()> {
         for _ in 0..SPIN_MAX {
             if self.io.port_read(EC_CMD)? & IBF == 0 {
