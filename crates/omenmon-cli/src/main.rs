@@ -27,6 +27,16 @@ enum Command {
     Battery,
     /// Live status one-shot (temps + fan + battery summary)
     Status,
+    /// Power telemetry: live CPU package watts + static limit bytes
+    Power,
+    /// Keyboard color table: show, or set one zone's RGB
+    Kbd {
+        /// Show the color table, or a zone number 0..3 to set
+        zone: Option<u8>,
+        /// Hex color like FF8800 (only with --zone)
+        #[arg(long)]
+        color: Option<String>,
+    },
     /// Long-running daemon (single-instance, battery alerts, curve loop)
     Daemon,
 }
@@ -39,6 +49,8 @@ fn main() -> anyhow::Result<()> {
         Command::Fans => fans()?,
         Command::Battery => battery()?,
         Command::Status => status()?,
+        Command::Power => power()?,
+        Command::Kbd { zone, color } => kbd(zone, color.as_deref())?,
         Command::Daemon => daemon::run()?,
     }
     Ok(())
@@ -145,6 +157,79 @@ fn status() -> anyhow::Result<()> {
         b.health_pct.map(|v| format!("{v} %")).unwrap_or("?".into()),
         if b.ac_online { "AC" } else { "battery" }
     );
+    Ok(())
+}
+
+fn power() -> anyhow::Result<()> {
+    use hp_wmi::payload::{Request, CMD_DEFAULT};
+    let b = bios()?;
+    println!("omenmon power — live telemetry (verified 2026-10-21)");
+    println!("{}", "=".repeat(50));
+    // 0x2A byte0 = live CPU package watts (moves under load, 5 Hz verified);
+    // bytes 3/4 = static limit candidates; EC C6/C7/C8 = static limits.
+    match b.raw_send(Request::with_data(CMD_DEFAULT, 0x2A, &[]), 128) {
+        Ok(r) if r.is_ok() => {
+            let watts = r.data.first().copied().unwrap_or(0);
+            println!("CPU package:    {watts:>3} W  (live)");
+            if r.data.len() > 4 {
+                println!("limit bytes:    0x{:02X} 0x{:02X} (static, unconfirmed meaning)", r.data[3], r.data[4]);
+            }
+        }
+        Ok(r) => anyhow::bail!("BIOS returned rwret={}", r.return_code),
+        Err(e) => anyhow::bail!("{e} (elevated run required)"),
+    }
+    if let Ok(io) = hp_ec::ecio::EcIo::connect() {
+        if let Ok(page) = io.with_lock(2000, |io| hp_ec::eram::Eram::new(io).read_range(0xC6, 3)) {
+            println!("EC limits:      0xC6={} 0xC7={} 0xC8={} (static)", page[0], page[1], page[2]);
+        }
+    }
+    Ok(())
+}
+
+fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
+    use hp_wmi::payload::{Request, CMD_KEYBOARD};
+    let b = bios()?;
+    match (zone, color) {
+        (None, _) => {
+            let r = b.get_color_table()?;
+            let d = &r.data;
+            println!("color table ({} bytes), zone colors at 0x1A + 3*i:", d.len());
+            for i in 0..4usize {
+                let o = 0x1A + i * 3;
+                if o + 2 < d.len() {
+                    println!("  zone {i}: {:02X}{:02X}{:02X}", d[o], d[o + 1], d[o + 2]);
+                }
+            }
+        }
+        (Some(z), Some(hex)) => {
+            if z > 3 {
+                anyhow::bail!("zone must be 0..3");
+            }
+            let c = u32::from_str_radix(hex.trim_start_matches("0x"), 16)
+                .map_err(|_| anyhow::anyhow!("bad hex color '{hex}'"))?;
+            // safe-write: read -> modify -> write -> verify -> restore on failure
+            let orig = b.get_color_table()?.data;
+            if orig.len() < 0x2A {
+                anyhow::bail!("color table too short");
+            }
+            let mut tbl = orig.clone();
+            let o = 0x1A + z as usize * 3;
+            tbl[o] = ((c >> 16) & 0xFF) as u8;
+            tbl[o + 1] = ((c >> 8) & 0xFF) as u8;
+            tbl[o + 2] = (c & 0xFF) as u8;
+            b.set_color_table(&tbl)?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let now = b.get_color_table()?.data;
+            if now[o..o + 3] == tbl[o..o + 3] {
+                println!("zone {z} set to {hex} — verified by readback");
+            } else {
+                println!("readback mismatch; attempting restore");
+                b.set_color_table(&orig)?;
+                anyhow::bail!("write not verified — original restored");
+            }
+        }
+        (Some(_), None) => anyhow::bail!("--color <hex> required with a zone"),
+    }
     Ok(())
 }
 

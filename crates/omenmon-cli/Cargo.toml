@@ -9,8 +9,24 @@ name = "omenmon"
 path = "src/main.rs"
 
 [[bin]]
+name = "kbd_probe"
+path = "src/bin/kbd_probe.rs"
+
+[[bin]]
+name = "kbd_rmw"
+path = "src/bin/kbd_rmw.rs"
+
+[[bin]]
+name = "power_series"
+path = "src/bin/power_series.rs"
+
+[[bin]]
 name = "omenmon-setup"
 path = "src/bin/setup.rs"
+
+[[bin]]
+name = "power_probe"
+path = "src/bin/power_probe.rs"
 
 [lib]
 name = "omenmon_cli"

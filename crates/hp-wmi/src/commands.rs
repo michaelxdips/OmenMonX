@@ -25,6 +25,11 @@ impl Bios {
         Ok(resp)
     }
 
+    /// Arbitrary raw request — for telemetry commands not yet wrapped.
+    pub fn raw_send(&self, req: Request, out_size: usize) -> Result<Response> {
+        self.ok(req, out_size)
+    }
+
     // ---- System / capability ----
 
     /// 0x28 GetSystem â€” support flags (fan ctl, extreme mode, GPU switch bits).
