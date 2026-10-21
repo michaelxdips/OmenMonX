@@ -136,6 +136,10 @@ path = "src/bin/bmof_crack.rs"
 name = "bmof_crack2"
 path = "src/bin/bmof_crack2.rs"
 
+[[bin]]
+name = "pl_effect"
+path = "src/bin/pl_effect.rs"
+
 [lib]
 name = "omenmon_cli"
 path = "src/lib.rs"
@@ -148,6 +152,7 @@ wmi = "0.14"
 windows = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+
 
 
 
