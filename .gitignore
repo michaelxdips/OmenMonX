@@ -10,3 +10,5 @@ __pycache__/
 # Screenshot artefacts from tools/ui. Captures are evidence for a session, not
 # source; regenerate them with tools/ui/shot.ps1 when needed.
 *.png
+
+/dist
