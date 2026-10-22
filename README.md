@@ -94,12 +94,8 @@ cargo build --release
 Binaries land in `target/release/`: `omenmon.exe`, `omenmon-gui.exe`,
 `omenmon-setup.exe`, `daemon.exe`.
 
-The reverse-engineering probes are **not** built by default. They need
-`--features probes` and are gated so they cannot leak into a release:
-
-```
-cargo build --release --features probes --bin fan_handoff_probe
-```
+The reverse-engineering instruments used to derive the protocol are not part of
+this repository; they were development tooling and are not built or shipped.
 
 ## License
 
