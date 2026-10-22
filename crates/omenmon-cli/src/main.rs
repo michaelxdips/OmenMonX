@@ -539,7 +539,10 @@ fn fan(setting: Option<&str>) -> anyhow::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             let settled = b.fan_levels()?.0;
             println!("released max mode: level {before} -> {after} -> {settled}");
-            println!("(0x27 off alone does not release the fans; a 0x2E write does)");
+            println!(
+                "handed back with 0x2E scheme 0 (EWMA_ALGO, HP's FanSetScheme); \
+                 the firmware owns the fans again"
+            );
         }
         Some(other) => {
             let pct: u8 = other
@@ -548,7 +551,7 @@ fn fan(setting: Option<&str>) -> anyhow::Result<()> {
             if pct > 100 {
                 anyhow::bail!("duty must be 0-100, got {pct}");
             }
-            b.set_sw_fan_control(1, pct, pct, pct)?;
+            b.set_fan_speed_pct(pct)?;
             std::thread::sleep(std::time::Duration::from_millis(2500));
             let after = b.fan_levels()?.0;
             println!("manual {pct}%: level {before} -> {after}");

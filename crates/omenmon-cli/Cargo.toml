@@ -430,3 +430,13 @@ required-features = ["probes"]
 name = "fan_release"
 path = "src/bin/fan_release.rs"
 required-features = ["probes"]
+
+[[bin]]
+name = "fan_mode_probe"
+path = "src/bin/fan_mode_probe.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_handoff_probe"
+path = "src/bin/fan_handoff_probe.rs"
+required-features = ["probes"]

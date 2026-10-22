@@ -8,21 +8,41 @@ pub struct Bios {
     session: HpWmi,
 }
 
+    /// The `0x2E` mode byte, named after HP's own enum.
+///
+/// Read from `PerformanceControl.dll` (HP's SDK) as static metadata:
+///
+/// ```text
+/// Hp.Bridge.Client.SDKs.PerformanceControl.Handlers.FanSetScheme
+///   EWMA_ALGO = 0, SLIDER = 1, IDLE_AUTO = 2, NO_SET = 3
+/// ```
+///
+/// These are not guesses. Each was confirmed against the hardware by watching the
+/// live level byte:
+///
+/// * [`EWMA_ALGO`](Self::EwmaAlgo) — level falls to 0 then ramps back on its own
+///   (3 → 17 → 23). That ramp is the firmware resuming control, which makes this
+///   the correct way to *release* a manual setting.
+/// * [`SLIDER`](Self::Slider) — level holds near the commanded percentage and does
+///   not ramp. This is manual control.
+/// * [`IDLE_AUTO`](Self::IdleAuto) — level drops to ~3 and stays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FanSetScheme {
+    /// The firmware's own algorithm. Sending this hands control back.
+    EwmaAlgo = 0,
+    /// Manual: hold the per-fan speed in bytes 1-3.
+    Slider = 1,
+    /// Idle algorithm: quiet, load-independent.
+    IdleAuto = 2,
+    /// No scheme selected.
+    NoSet = 3,
+}
+
 impl Bios {
+    /// Open the BIOS interface. Fails without an elevated token.
     pub fn connect() -> Result<Self> {
         Ok(Self { session: HpWmi::connect()? })
-    }
-
-    fn ok(&self, req: Request, out_size: usize) -> Result<Response> {
-        let resp = self.session.send(&req, out_size)?;
-        if !resp.is_ok() {
-            return Err(crate::Error::BiosError {
-                code: resp.return_code,
-                command: req.command,
-                command_type: req.command_type,
-            });
-        }
-        Ok(resp)
     }
 
     /// Arbitrary raw request — for telemetry commands not yet wrapped.
@@ -48,6 +68,19 @@ impl Bios {
         self.ok(Request::new(CMD_DEFAULT, 0x2C), 128)
     }
 
+    /// Send and reject a non-zero BIOS return code.
+    fn ok(&self, req: Request, out_size: usize) -> Result<Response> {
+        let resp = self.session.send(&req, out_size)?;
+        if !resp.is_ok() {
+            return Err(crate::Error::BiosError {
+                code: resp.return_code,
+                command: req.command,
+                command_type: req.command_type,
+            });
+        }
+        Ok(resp)
+    }
+
     // ---- Fans ----
 
     /// 0x2D GetFanLevel — per-fan current level.
@@ -57,23 +90,16 @@ impl Bios {
 
     /// 0x2E SetSwFanControlLevel — software fan control.
     ///
-    /// **Payload is `{mode, cpu_pct, gpu_pct, fan3_pct}`**, matching OMEN Gaming
-    /// Hub's own call site, whose log line is
-    /// `SetSwFanControlLevel(), {0}, cpuFanSpeed={1}, gpuFanSpeed={2}, fan3Speed={3}`.
-    /// Byte 0 is a mode selector, not a speed.
+    /// Payload is `{scheme, cpu_pct, gpu_pct, fan3_pct}`. Byte 0 is a
+    /// [`FanSetScheme`], bytes 1-3 are per-fan speeds that only matter for
+    /// [`FanSetScheme::Slider`].
     ///
-    /// This is **verified working on board 8C9C**, and it is the command that
-    /// releases the fans after `0x27` max mode: with mode 1 at 20 %, the live
-    /// level byte fell 58 → 4 within ten seconds. An earlier conclusion that
-    /// "0x2E is a silent no-op" was wrong — that test wrote fan-table dB indices
-    /// into bytes 0-1, which is a different (and meaningless) payload.
-    ///
-    /// Mode semantics are not fully mapped. Mode 1 with a speed is proven to take
-    /// effect; mode 0 is believed to hand control back to the firmware, but that
-    /// is unverified, so callers should not depend on it.
-    pub fn set_sw_fan_control(&self, mode: u8, cpu: u8, gpu: u8, fan3: u8) -> Result<()> {
+    /// **Verified working on board 8C9C.** An earlier conclusion that "0x2E is a
+    /// silent no-op" was wrong: that probe wrote fan-table dB indices into bytes 0-1,
+    /// which the firmware reads as a scheme and a speed.
+    pub fn set_sw_fan_control(&self, scheme: FanSetScheme, cpu: u8, gpu: u8, fan3: u8) -> Result<()> {
         self.ok(
-            Request::with_data(CMD_DEFAULT, 0x2E, &[mode, cpu, gpu, fan3]),
+            Request::with_data(CMD_DEFAULT, 0x2E, &[scheme as u8, cpu, gpu, fan3]),
             0,
         )?;
         Ok(())
@@ -122,20 +148,40 @@ impl Bios {
 
     /// Leave max-fan mode and hand the fans back to the firmware.
     ///
-    /// `set_max_fan(false)` alone is not enough on this board: the level stays
-    /// pinned at maximum. A 0x2E manual write is what actually releases it, so
-    /// this does both and reports the level it observed afterwards.
+    /// `set_max_fan(false)` alone does not release them: the level stays pinned at
+    /// maximum. The release has to come from `0x2E`.
     ///
-    /// The 0x2E write uses a low speed so the fans audibly spool down; passing
-    /// `None` sends mode 0, which is *intended* to mean "firmware controlled" but
-    /// is unverified, so the measured level is returned either way and the caller
-    /// can tell the user what really happened.
+    /// **The scheme matters, and the obvious choice is wrong.** Sending
+    /// [`FanSetScheme::Slider`] at 20 % looks like a release but is a manual hold:
+    /// measured from max, the level fell 59 → 34 and then latched at 39, never
+    /// dipping. OmenCore's `WmiFanController.cs` documents the same write as a
+    /// "transition hint" that leaves fans "sitting at level 20 (about 2000 RPM) at
+    /// 80 to 96 C" on boards that skip the matching floor clear, and keeps it
+    /// opt-in for that reason.
+    ///
+    /// [`FanSetScheme::EwmaAlgo`] is the real release: measured from max, the level
+    /// dipped to 0 and then ramped 3 → 17 → 23 on its own, which is the firmware
+    /// resuming control.
+    ///
+    /// Returns the level observed after the write settles.
     pub fn release_max_fan(&self) -> Result<u8> {
         let _ = self.set_max_fan(false);
-        self.set_sw_fan_control(1, 20, 20, 20)?;
-        std::thread::sleep(std::time::Duration::from_millis(900));
+        // Hand the algorithm back, then sample: one read immediately after the
+        // write still catches the old value while the fans spool down.
+        self.set_sw_fan_control(FanSetScheme::EwmaAlgo, 0, 0, 0)?;
+        std::thread::sleep(std::time::Duration::from_millis(1200));
         let (a, _b) = self.fan_levels()?;
         Ok(a)
+    }
+
+    /// Hold a manual fan speed as a percentage of full scale.
+    ///
+    /// Uses [`FanSetScheme::Slider`], the scheme that actually holds a value. This
+    /// is a *manual* setting and stays until something releases it — call
+    /// [`Bios::release_max_fan`] or send `EwmaAlgo` to give control back.
+    pub fn set_fan_speed_pct(&self, pct: u8) -> Result<()> {
+        let pct = pct.min(100);
+        self.set_sw_fan_control(FanSetScheme::Slider, pct, pct, pct)
     }
 
     /// 0x1A SetFanMode — e.g. 0x30 default, 0x31 performance, 0x50 cool.
@@ -971,16 +1017,26 @@ mod tests {
 
     // ---- Fan control: the payload shapes that were verified on hardware ----
 
-    /// 0x2E is `{mode, cpu, gpu, fan3}`, not `{fan1, fan2, ...}`.
-    ///
-    /// This distinction is the whole reason the old probe concluded "0x2E is a
-    /// no-op": it wrote table dB indices into bytes 0-1, which the firmware reads
-    /// as a mode and a speed. The shape is pinned here so it cannot regress.
+    /// The scheme byte values come from HP's own `FanSetScheme` enum in
+    /// `PerformanceControl.dll`, read as static metadata. If this ever drifts from
+    /// the vendor's numbering, every fan write silently does something else.
     #[test]
-    fn sw_fan_control_payload_is_mode_then_speeds() {
-        let (mode, cpu, gpu, fan3) = (1u8, 20u8, 20u8, 20u8);
-        let payload = [mode, cpu, gpu, fan3];
-        assert_eq!(payload[0], 1, "byte 0 is the mode, not a speed");
+    fn fan_set_scheme_matches_the_vendor_enum() {
+        assert_eq!(FanSetScheme::EwmaAlgo as u8, 0);
+        assert_eq!(FanSetScheme::Slider as u8, 1);
+        assert_eq!(FanSetScheme::IdleAuto as u8, 2);
+        assert_eq!(FanSetScheme::NoSet as u8, 3);
+    }
+
+    /// 0x2E is `{scheme, cpu, gpu, fan3}`, not `{fan1, fan2, ...}`.
+    ///
+    /// This distinction is why an earlier probe concluded "0x2E is a no-op": it
+    /// wrote table dB indices into bytes 0-1, which the firmware reads as a scheme
+    /// and a speed.
+    #[test]
+    fn sw_fan_control_payload_is_scheme_then_speeds() {
+        let payload = [FanSetScheme::Slider as u8, 20, 20, 20];
+        assert_eq!(payload[0], 1, "byte 0 is the scheme, not a speed");
         assert_eq!(&payload[1..], &[20, 20, 20], "bytes 1-3 are per-fan speeds");
         assert_eq!(payload.len(), 4, "a longer payload is a different command form");
     }
@@ -995,32 +1051,32 @@ mod tests {
         assert_eq!(&on[1..], &[0, 0, 0], "the tail is padding");
     }
 
-    /// Max-fan OFF alone does not release the fans on this board.
+    /// Releasing max must use `EwmaAlgo`, not a low `Slider` value.
     ///
-    /// Recorded as a test because it is the kind of thing that gets "simplified"
-    /// later: a reader sees `set_max_fan(false)` and deletes the 0x2E write that
-    /// follows it, and the fans stay stuck at maximum. The verified release path
-    /// is 0x27 off *plus* a 0x2E write, so `release_max_fan` must contain both.
+    /// Measured from max: `Slider` at 20 % fell 59 -> 34 then latched at 39 and
+    /// never dipped; `EwmaAlgo` dipped to 0 and ramped 3 -> 17 -> 23 on its own.
+    /// OmenCore's source flags the 20 % write as leaving fans pinned near 2000 RPM
+    /// at 80-96 C on boards that skip the floor clear. A "release" that holds a
+    /// manual floor is a throttle with a reassuring name.
     #[test]
-    fn release_max_fan_uses_both_commands() {
+    fn release_uses_ewma_not_a_slider_floor() {
         let src = include_str!("commands.rs");
+        // The body ends where the next method's doc comment begins.
         let body = src
             .split("pub fn release_max_fan")
             .nth(1)
-            .and_then(|s| s.split("/// 0x1A SetFanMode").next())
+            .and_then(|s| s.split("/// Hold a manual fan speed").next())
             .expect("release_max_fan must exist");
         assert!(
-            body.contains("set_max_fan(false)"),
-            "must clear the max-fan flag first"
+            body.contains("FanSetScheme::EwmaAlgo"),
+            "release must hand the algorithm back"
         );
         assert!(
-            body.contains("set_sw_fan_control"),
-            "0x27 off alone leaves the fans pinned; a 0x2E write is what releases them"
+            !body.contains("FanSetScheme::Slider"),
+            "a slider write is a manual hold, not a release"
         );
-        assert!(
-            body.contains("fan_levels"),
-            "the observed level must be returned, not assumed"
-        );
+        assert!(body.contains("set_max_fan(false)"), "the max flag is cleared first");
+        assert!(body.contains("fan_levels"), "the observed level must be returned");
     }
 }
 
