@@ -28,11 +28,11 @@ fn main() -> anyhow::Result<()> {
         // `--help` and `-h` are what a user types first. Answering them with an
         // error and exit code 1 reads as a broken program, so print the usage and
         // exit 0.
-        "help" | "--help" | "-h" => {
+        "help" | "--help" | "-h" | "usage" => {
             println!("omenmon-setup {}", env!("CARGO_PKG_VERSION"));
             println!();
             println!("Installs OmenMon to C:\\Program Files\\OmenMon:");
-            println!("  - copies omenmon.exe, omenmon-gui.exe, omenmon-setup.exe");
+            println!("  - copies omenmon.exe, omenmon-gui.exe, daemon.exe, omenmon-setup.exe");
             println!("  - adds the install dir to the user PATH");
             println!("  - registers an elevated logon task that runs `omenmon apply`");
             println!("  - adds an Add/Remove Programs entry");
@@ -105,7 +105,7 @@ fn install() -> anyhow::Result<()> {
             exe_dir.display()
         );
     }
-    for name in ["omenmon.exe", "omenmon-gui.exe", "omenmon-setup.exe"] {
+    for name in ["omenmon.exe", "omenmon-gui.exe", "omenmon-setup.exe", "daemon.exe"] {
         let src = exe_dir.join(name);
         if src.exists() {
             std::fs::copy(&src, PathBuf::from(INSTALL_DIR).join(name))?;
@@ -212,7 +212,7 @@ fn uninstall() -> anyhow::Result<()> {
     // omenmon-gui.exe, so uninstall left the largest file behind and the install
     // directory could never be removed - a reinstall then inherited a stale GUI.
     // status.log is not in the list: nothing in this project creates it.
-    for name in ["omenmon.exe", "omenmon-gui.exe", "omenmon-setup.exe"] {
+    for name in ["omenmon.exe", "omenmon-gui.exe", "omenmon-setup.exe", "daemon.exe"] {
         let p = PathBuf::from(INSTALL_DIR).join(name);
         if p.exists() {
             if let Err(e) = std::fs::remove_file(&p) {
