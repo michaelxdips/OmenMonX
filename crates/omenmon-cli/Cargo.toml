@@ -29,3 +29,14 @@ path = "src/bin/setup.rs"
 [[bin]]
 name = "daemon"
 path = "src/bin/daemon.rs"
+
+# Arbitration measurement probe: two-process concurrent RGB write stress.
+# Gated so it never builds into a release (the CI probe-leak gate counts
+# exes); run with: cargo build --release --features probes
+[[bin]]
+name = "arbitration_probe"
+path = "src/bin/arbitration_probe.rs"
+required-features = ["probes"]
+
+[features]
+probes = []

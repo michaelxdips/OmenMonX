@@ -25,7 +25,8 @@ pub mod daemon {
             // Clear any stale lock from an interrupted previous run.
             let _ = std::fs::remove_file(&path);
 
-            let first = InstanceGuard::acquire().expect("first acquire must succeed");            assert!(path.exists(), "lock file must exist while held");
+            let first = InstanceGuard::acquire().expect("first acquire must succeed");
+            assert!(path.exists(), "lock file must exist while held");
 
             let second = InstanceGuard::acquire();
             assert!(
