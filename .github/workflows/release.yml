@@ -67,6 +67,21 @@ jobs:
           $lines | Out-File -FilePath dist/SHA256SUMS.txt -Encoding ascii
           Get-Content dist/SHA256SUMS.txt
 
+      # Portable zip: everything a user needs in one archive, no installer.
+      # The setup binary and the README install section both point users
+      # here when they do not want a Program Files install.
+      - name: Portable zip (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/omenmon.exe, dist/omenmon-gui.exe,
+            dist/daemon.exe, dist/omenmon-setup.exe, dist/SHA256SUMS.txt,
+            dist/README.md, dist/LICENSE `
+            -DestinationPath dist/OmenMonX-portable.zip -Force
+          $zipHash = (Get-FileHash dist/OmenMonX-portable.zip -Algorithm SHA256).Hash.ToLower()
+          Add-Content -Path dist/SHA256SUMS.txt -Value "$zipHash  OmenMonX-portable.zip" -Encoding ascii
+          Get-Content dist/SHA256SUMS.txt
+
       - name: Upload artifacts (every run)
         uses: actions/upload-artifact@v4
         with:

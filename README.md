@@ -28,6 +28,11 @@ the table below was measured on the reference machine; nothing is aspirational.
 2. Download `omenmon-setup.exe` from Releases and run it as administrator.
 3. `omenmon status` — done.
 
+**Portable, no install:** download `OmenMonX-portable.zip` from Releases, unzip
+anywhere, run `omenmon-gui.exe` or `omenmon.exe` from the folder. Verify the
+archive against the `SHA256SUMS.txt` inside the zip. A portable copy does not
+touch PATH, autostart or the registry.
+
 ## Commands
 
 ```
