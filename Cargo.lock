@@ -1373,7 +1373,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hp-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hp-ec",
  "hp-wmi",
@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "hp-ec"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "parking_lot",
  "thiserror 2.0.21",
@@ -1398,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "hp-wmi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror 2.0.21",
  "tracing",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "omenmon-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "omenmon-gui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",

@@ -1,0 +1,54 @@
+name: ci
+
+# Runs the gates on every push and pull request.
+#
+# This workflow exists because it did not: before it, release.yml only built the
+# binaries, so 109 tests and a silent clippy run were never enforced by anything.
+# A commit that broke every test still produced a green release.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The probes are gated behind a feature so they cannot leak into a release.
+      # This step proves the gate holds: a plain release build must produce only
+      # the shipped binaries.
+      - name: Release build produces no probes
+        shell: pwsh
+        run: |
+          cargo build --release
+          $shipped = @('omenmon.exe','omenmon-gui.exe','omenmon-setup.exe','watch.exe','daemon.exe')
+          $built = Get-ChildItem target/release -Filter *.exe | Select-Object -ExpandProperty Name
+          $leaked = $built | Where-Object { $shipped -notcontains $_ }
+          if ($leaked) {
+            Write-Error "reverse-engineering probes leaked into the release build: $($leaked -join ', ')"
+            exit 1
+          }
+          Write-Host "release build contains only: $($built -join ', ')"
+
+      # The probe gate is also asserted from inside the crate, so a contributor
+      # who never runs CI still sees it fail locally.
+      - name: Probe gate test
+        run: cargo test -p omenmon-cli no_probe_leaks_into_release

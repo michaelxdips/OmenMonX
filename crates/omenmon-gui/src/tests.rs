@@ -156,6 +156,57 @@ fn dashboard_does_not_show_the_stale_rpm_sensor() {
     );
 }
 
+/// The README and the About page must not disagree about fan control.
+///
+/// This exists because they did: the About page said fan control was dead while
+/// the code had it working, and the README said it awaited a signed kernel module.
+/// A reader got a false picture from either one. Both are checked against each
+/// other now, so editing one forces a look at the other.
+#[test]
+fn readme_and_about_agree_on_fan_control() {
+    let readme = include_str!("../../../README.md");
+    let about = include_str!("ui/pages/about.rs");
+
+    assert!(
+        readme.contains("Fan speed control works on this board"),
+        "README must state that fan control works"
+    );
+    assert!(
+        !readme.contains("awaits a signed kernel module"),
+        "that sentence was wrong and must not come back"
+    );
+    assert!(
+        !readme.contains("0x2E and 0x32 are silent no-ops"),
+        "that sentence was wrong and must not come back"
+    );
+    assert!(
+        readme.contains("EWMA_ALGO") && about.contains("Fan max mode"),
+        "both documents must describe the working path"
+    );
+
+    // The README's stated version must be the version being built.
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        readme.contains(version),
+        "README says a different version than the crate ({version})"
+    );
+}
+
+/// The README must not promise an RPM readout the sensor cannot deliver.
+#[test]
+fn readme_does_not_claim_live_rpm() {
+    let readme = include_str!("../../../README.md");
+    assert!(
+        readme.contains("frozen 1249 rpm"),
+        "the README must state the tachometer is frozen, not advertise RPM"
+    );
+    assert!(
+        !readme.contains("RPM + level monitoring"),
+        "the old feature row advertised RPM; the sensor is frozen"
+    );
+}
+
+/// The tray's window lookup must not depend on a class name.
 ///
 /// This is the bug a live run exposed: `find_own_window` required the class to be
 /// `OmenMon`, but winit registers `Window Class`, so it returned `None` on every

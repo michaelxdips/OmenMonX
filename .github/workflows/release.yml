@@ -15,6 +15,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A release must not be built from code that fails its own gates.
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build release
         run: cargo build --release
@@ -22,11 +33,35 @@ jobs:
       - name: Collect artifacts
         shell: pwsh
         run: |
+          $shipped = @('omenmon.exe','omenmon-gui.exe','omenmon-setup.exe')
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/omenmon.exe dist/
-          Copy-Item target/release/omenmon-gui.exe dist/
-          Copy-Item target/release/omenmon-setup.exe dist/
+          foreach ($name in $shipped) {
+            $src = "target/release/$name"
+            if (-not (Test-Path $src)) { Write-Error "missing $name"; exit 1 }
+            Copy-Item $src dist/
+          }
+          # Anything else in target/release is a probe and must not ship.
+          $leaked = Get-ChildItem target/release -Filter *.exe |
+            Where-Object { $shipped -notcontains $_.Name }
+          if ($leaked) {
+            Write-Error "probes leaked into the release: $($leaked.Name -join ', ')"
+            exit 1
+          }
           Copy-Item README.md, LICENSE dist/
+          Write-Host "dist:"; Get-ChildItem dist | Select-Object Name, Length
+
+      # The updater verifies a SHA-256 before running anything it downloads, so
+      # publish a checksum file next to the assets. Without it, the only digest a
+      # user can check against is GitHub's own API, which is exactly what the
+      # updater already does - this is the human-readable second opinion.
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem dist -Filter *.exe | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          $lines | Out-File -FilePath dist/SHA256SUMS.txt -Encoding ascii
+          Get-Content dist/SHA256SUMS.txt
 
       - name: Upload artifacts (every run)
         uses: actions/upload-artifact@v4
