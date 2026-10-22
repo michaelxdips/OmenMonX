@@ -396,3 +396,37 @@ required-features = ["probes"]
 name = "scan_ext"
 path = "src/bin/scan_ext.rs"
 required-features = ["probes"]
+
+# 2026-10-22 fan-control investigation. These six were added without [[bin]]
+# entries, so Cargo's auto-discovery built them into every release — including the
+# installer. They are gated now, and `no_probe_leaks_into_release` in the CLI tests
+# fails if a probe escapes again.
+[[bin]]
+name = "fan_probe2"
+path = "src/bin/fan_probe2.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_rpm_probe"
+path = "src/bin/fan_rpm_probe.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_sensor_check"
+path = "src/bin/fan_sensor_check.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_2d_probe"
+path = "src/bin/fan_2d_probe.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_max_verify"
+path = "src/bin/fan_max_verify.rs"
+required-features = ["probes"]
+
+[[bin]]
+name = "fan_release"
+path = "src/bin/fan_release.rs"
+required-features = ["probes"]
