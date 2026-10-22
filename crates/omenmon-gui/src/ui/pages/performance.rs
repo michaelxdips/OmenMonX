@@ -35,12 +35,6 @@ impl App {
                         "0x29 and 0x2A are admin-only; the rest of the app works without them"
                     }),
                 );
-                if !st.elevated {
-                    ui.add_space(space::SM);
-                    if w::primary_button(ui, p, "Restart as administrator", true).clicked() {
-                        self.relaunch_elevated(ui.ctx());
-                    }
-                }
             });
             return;
         }

@@ -43,14 +43,23 @@ impl App {
                 return;
             }
             let Some(rows) = st.bios_settings.as_ref() else {
+                // The raw WMI text is `Impersonation failed - Access denied
+                // (0x80041003)`, which tells a user nothing they can act on. The
+                // card says what is missing and what unlocks it instead.
+                let reason = if st.elevated {
+                    "the BIOS interface refused the read"
+                } else {
+                    "BIOS settings need an elevated token"
+                };
                 w::empty(
                     ui,
                     p,
-                    &st
-                        .bios_error
-                        .clone()
-                        .unwrap_or_else(|| "unavailable".into()),
-                    Some("requires elevation: the InstrumentedBIOS namespace is admin-only"),
+                    reason,
+                    Some(if st.elevated {
+                        "the InstrumentedBIOS namespace did not answer on this boot"
+                    } else {
+                        "the InstrumentedBIOS namespace is admin-only; telemetry and battery still work"
+                    }),
                 );
                 if w::quiet_button(ui, p, "Retry", true).clicked() {
                     self.load_bios_async();
@@ -69,7 +78,14 @@ impl App {
             ui.add_space(space::SM);
             table_header(ui, p);
 
-            let max_h = (ui.available_height() - 96.0).max(160.0);
+            // Content-based height: rows (≈36 px each incl. margins) + the
+            // table header, capped so a huge table cannot eat the page. The old
+            // hardcoded -96.0 had no relation to what it was reserving.
+            let row_h = 36.0_f32;
+            let header_h = 26.0_f32;
+            let max_h = (rows.len() as f32 * row_h + header_h)
+                .min((ui.available_height() - header_h).max(160.0))
+                .max(160.0);
             let rows = rows.clone();
             egui::ScrollArea::vertical()
                 .max_height(max_h)
@@ -104,7 +120,7 @@ impl App {
                                     ui.label(
                                         egui::RichText::new(&row.current)
                                             .size(BODY)
-                                            .color(p.accent)
+                                            .color(p.text)
                                             .family(theme::numeric()),
                                     );
                                     if let Some(msg) = &row.last_write {
@@ -139,30 +155,33 @@ impl App {
                 return;
             };
             let row: BiosRow = row;
+            // No accent stroke: the edit box is a control, not a selected state.
             egui::Frame::default()
-                .fill(p.panel)
-                .stroke(egui::Stroke::new(theme::HAIRLINE, p.accent))
+                .fill(p.raised)
+                .stroke(egui::Stroke::new(theme::HAIRLINE, p.border))
                 .rounding(radius::CARD)
                 .inner_margin(egui::Margin::symmetric(space::LG, space::SM))
                 .show(ui, |ui| {
+                    // Row 1: what is being edited. Row 2: the editor. A single
+                    // row overflowed a half-width card at the 940 px minimum.
+                    ui.label(
+                        egui::RichText::new(&row.name)
+                            .size(BODY)
+                            .color(p.text)
+                            .family(crate::theme::proportional()),
+                    );
+                    ui.add_space(space::SM);
                     ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&row.name)
-                                .size(BODY)
-                                .color(p.text)
-                                .family(crate::theme::proportional()),
-                        );
-                        ui.add_space(space::SM);
                         if row.possible.is_empty() {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.bios_new_value)
-                                    .desired_width(240.0)
+                                    .desired_width(ui.available_width() - 96.0)
                                     .font(egui::TextStyle::Monospace),
                             );
                         } else {
                             egui::ComboBox::from_id_source("bios_val")
                                 .selected_text(self.bios_new_value.clone())
-                                .width(240.0)
+                                .width((ui.available_width() - 96.0).max(120.0))
                                 .show_ui(ui, |ui| {
                                     for v in &row.possible {
                                         ui.selectable_value(&mut self.bios_new_value, v.clone(), v);
@@ -226,7 +245,7 @@ impl App {
                             if is_active { p.accent } else { p.border },
                         ))
                         .rounding(theme::radius::CONTROL)
-                        .min_size(egui::vec2(0.0, 28.0));
+                        .min_size(egui::vec2(0.0, 30.0));
                     if ui.add(btn).clicked() && !is_active {
                         chosen = Some(*m);
                     }
@@ -275,15 +294,22 @@ impl App {
             );
             ui.add_space(space::SM);
             w::divider(ui, p);
-            ui.add_space(space::SM);
-            self.updates_card(ui, p);
+            // UPDATES inline under a divider: a card inside a card breaks the
+            // two-elevation rule, and the content is small enough to share.
+            self.updates_section(ui, p);
         });
     }
 
-    fn updates_card(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        w::card(ui, p, "UPDATES", |ui| {
-            let s = self.updates.0.lock();
-            if let Some(l) = &s.latest {
+    fn updates_section(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.label(
+            egui::RichText::new("UPDATES")
+                .size(LABEL)
+                .color(p.dim)
+                .family(theme::proportional()),
+        );
+        ui.add_space(space::SM);
+        let s = self.updates.0.lock();
+        if let Some(l) = &s.latest {
                 ui.label(
                     egui::RichText::new(format!("latest release v{l}"))
                         .size(BODY)
@@ -396,15 +422,13 @@ impl App {
                         .family(theme::proportional()),
                 );
             }
-        });
     }
-
     fn diagnostics_card(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
         w::card(ui, p, "DIAGNOSTICS", |ui| {
             c::body_text(ui, p, "One block with every readback for a bug report.");
             ui.add_space(space::SM);
             if w::quiet_button(ui, p, "Copy to clipboard", true).clicked() {
-                let text = diag::build(st, self.tray_error.as_deref(), self.ui.zoom, "Dark");
+                let text = diag::build(st, self.tray_error.as_deref(), self.ui.zoom);
                 self.diag = match elevate::copy_to_clipboard(&text) {
                     Ok(()) => "copied".into(),
                     Err(e) => format!("copy failed: {e}"),

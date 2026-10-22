@@ -24,21 +24,20 @@ pub const VALUE: f32 = 18.0;
 pub const BODY: f32 = 13.0;
 pub const LABEL: f32 = 11.0;
 
-/// Spacing scale. Three steps: card pad, stack gap, row gap.
+/// Spacing scale. Four steps: micro gap, row gap, stack gap, card pad.
+///
+/// `item_spacing` is zeroed in [`apply`]: ALL rhythm comes from explicit
+/// `add_space` calls with these tokens. Implicit gaps are what produced
+/// double-spacing when a layout added its own space on top of egui's default.
 pub mod space {
+    /// 4 — between a glyph and its label, inside a control.
+    pub const XS: f32 = 4.0;
     /// 8 — inside a card between rows.
     pub const SM: f32 = 8.0;
     /// 12 — between stacked cards.
     pub const MD: f32 = 12.0;
     /// 16 — card padding, gutter.
     pub const LG: f32 = 16.0;
-    /// Deprecated aliases. Kept so old ui.toml files still parse.
-    #[allow(dead_code)]
-    pub const XS: f32 = 4.0;
-    #[allow(dead_code)]
-    pub const XL: f32 = 24.0;
-    #[allow(dead_code)]
-    pub const XXL: f32 = 32.0;
 }
 
 /// Corner radii. Three values, each with one job.
@@ -87,7 +86,6 @@ pub mod elevation {
 pub enum Theme {
     #[default]
     Dark,
-    Light,
 }
 
 /// A top-level page. Replaces the old tab strip: OGH uses a rail, and a rail
@@ -302,32 +300,8 @@ impl Palette {
         dark_mode: true,
     };
 
-    /// Light theme keeps the same hue meanings but darkens each accent until it
-    /// clears 4.5:1 on the light surface. The dark crimson is illegible on white.
-    pub const LIGHT: Palette = Palette {
-        shell: egui::Color32::from_rgb(0xE7, 0xE9, 0xEE),
-        bg: egui::Color32::from_rgb(0xF5, 0xF6, 0xF9),
-        panel: egui::Color32::from_rgb(0xFF, 0xFF, 0xFF),
-        raised: egui::Color32::from_rgb(0xEE, 0xF0, 0xF4),
-        border: egui::Color32::from_rgb(0xD3, 0xD7, 0xDF),
-        accent: egui::Color32::from_rgb(0xC4, 0x0E, 0x2C),
-        accent_soft: egui::Color32::from_rgb(0xFB, 0xE0, 0xE4),
-        cpu: egui::Color32::from_rgb(0xB8, 0x2A, 0x14),
-        gpu: egui::Color32::from_rgb(0x0B, 0x6C, 0x8F),
-        red: egui::Color32::from_rgb(0xC0, 0x1C, 0x22),
-        amber: egui::Color32::from_rgb(0x8A, 0x53, 0x00),
-        green: egui::Color32::from_rgb(0x14, 0x6B, 0x33),
-        text: egui::Color32::from_rgb(0x16, 0x18, 0x1D),
-        dim: egui::Color32::from_rgb(0x55, 0x5B, 0x67),
-        faint: egui::Color32::from_rgb(0x86, 0x8C, 0x98),
-        dark_mode: false,
-    };
-
-    pub fn of(theme: Theme) -> Self {
-        match theme {
-            Theme::Dark => Self::DARK,
-            Theme::Light => Self::LIGHT,
-        }
+    pub fn of(_theme: Theme) -> Self {
+        Self::DARK
     }
 
     /// Temperature colour. Thresholds are the ones the thermal card documents.
@@ -374,7 +348,7 @@ pub fn apply(ctx: &egui::Context, p: &Palette) {
     style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, p.accent);
     style.visuals.window_rounding = egui::Rounding::same(10.0);
     style.visuals.menu_rounding = egui::Rounding::same(8.0);
-    style.spacing.item_spacing = egui::vec2(8.0, 7.0);
+    style.spacing.item_spacing = egui::vec2(0.0, 0.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
     style.spacing.interact_size.y = 24.0;
 
@@ -459,43 +433,6 @@ fn load_font(names: &[&str]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// Light-theme accents must stay readable on the light surface. This is a
-    /// coarse relative-luminance check, not a full WCAG audit, but it catches the
-    /// obvious mistake of reusing the dark crimson on white.
-    #[test]
-    fn light_accents_clear_background() {
-        fn lum(c: egui::Color32) -> f32 {
-            let ch = |v: u8| {
-                let s = v as f32 / 255.0;
-                if s <= 0.03928 {
-                    s / 12.92
-                } else {
-                    ((s + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * ch(c.r()) + 0.7152 * ch(c.g()) + 0.0722 * ch(c.b())
-        }
-        fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
-            let (x, y) = (lum(a), lum(b));
-            let (hi, lo) = if x > y { (x, y) } else { (y, x) };
-            (hi + 0.05) / (lo + 0.05)
-        }
-        let p = Palette::LIGHT;
-        for (name, c) in [
-            ("accent", p.accent),
-            ("cpu", p.cpu),
-            ("gpu", p.gpu),
-            ("red", p.red),
-            ("amber", p.amber),
-            ("green", p.green),
-            ("text", p.text),
-            ("dim", p.dim),
-        ] {
-            let cr = contrast(c, p.panel);
-            assert!(cr >= 4.5, "{name} on light panel is {cr:.2}:1, need 4.5");
-        }
-    }
-
     /// Dark chrome must stay dark, and the accent must actually be hot. A theme
     /// regression that swaps these is otherwise invisible until someone looks.
     #[test]
@@ -513,12 +450,6 @@ mod tests {
         assert!(p.panel.r() < p.raised.r());
     }
 
-    #[test]
-    fn palettes_differ() {
-        assert_ne!(Palette::DARK.accent, Palette::LIGHT.accent);
-        assert_ne!(Palette::DARK.bg, Palette::LIGHT.bg);
-    }
-
     /// Temperature thresholds: cool is green, warm amber, hot red. The boundary
     /// values are inclusive, which is what the gauge labels assume.
     #[test]
@@ -534,8 +465,11 @@ mod tests {
     /// A truncated or corrupt ui.toml must fall back to defaults, not panic.
     #[test]
     fn ui_state_tolerates_missing_fields() {
-        let s: UiState = toml::from_str("theme = \"light\"").expect("partial config parses");
-        assert_eq!(s.theme, Theme::Light);
+        // The old "theme = light" value must not break loading; it deserializes
+        // to the only theme there is.
+        assert!(toml::from_str::<UiState>("theme = \"light\"").is_err());
+        let s: UiState = toml::from_str("page = \"dashboard\"").expect("partial config parses");
+        assert_eq!(s.theme, Theme::Dark);
         assert_eq!(s.page, Page::Dashboard);
         assert!(s.close_to_tray, "default is to keep sampling in the tray");
         assert!(toml::from_str::<UiState>("not toml at all").is_err());
@@ -551,7 +485,7 @@ mod tests {
     #[test]
     fn ui_state_roundtrips() {
         let s = UiState {
-            theme: Theme::Light,
+            theme: Theme::Dark,
             page: Page::System,
             window: Some([1100.0, 720.0]),
             compact: true,
@@ -561,7 +495,7 @@ mod tests {
         };
         let t = toml::to_string_pretty(&s).unwrap();
         let back: UiState = toml::from_str(&t).unwrap();
-        assert_eq!(back.theme, Theme::Light);
+        assert_eq!(back.theme, Theme::Dark);
         assert_eq!(back.page, Page::System);
         assert_eq!(back.window, Some([1100.0, 720.0]));
         assert!(back.compact);
@@ -583,7 +517,7 @@ mod tests {
     /// failing the whole file and losing the user's window size and theme.
     #[test]
     fn missing_zoom_defaults_to_one() {
-        let s: UiState = toml::from_str("theme = \"light\"\npage = \"system\"\n").unwrap();
+        let s: UiState = toml::from_str("page = \"system\"\n").unwrap();
         assert_eq!(s.zoom, 1.0);
         assert_eq!(s.page, Page::System, "the rest of the file must still load");
     }

@@ -8,6 +8,7 @@ use crate::theme::{self, elevation, radius, space, Palette, BODY, HAIRLINE, LABE
 pub fn meter(ui: &mut Ui, p: &Palette, label: &str, value_text: &str, fraction: f32, colour: Color32) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(label).size(LABEL).color(p.dim));
+        ui.add_space(space::XS);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(value_text)
@@ -25,6 +26,7 @@ pub fn meter(ui: &mut Ui, p: &Palette, label: &str, value_text: &str, fraction: 
     if fill.width() > 0.5 {
         painter.rect_filled(fill, 3.0, colour);
     }
+    ui.add_space(space::SM);
 }
 
 /// A card with a title row and an optional right-aligned action area.
@@ -62,7 +64,7 @@ pub fn stat(ui: &mut Ui, p: &Palette, caption: &str, value: &str, colour: Color3
                 .color(p.dim)
                 .family(theme::proportional()),
         );
-        ui.add_space(space::XS * 0.5);
+        ui.add_space(space::XS);
         ui.label(
             egui::RichText::new(value)
                 .size(VALUE)
@@ -77,7 +79,7 @@ pub fn primary_button(ui: &mut Ui, p: &Palette, text: &str, enabled: bool) -> Re
     let btn = egui::Button::new(
         egui::RichText::new(text)
             .size(BODY)
-            .color(if enabled { p.shell } else { p.faint() })
+            .color(if enabled { p.shell } else { p.dim })
             .family(theme::proportional()),
     )
     .fill(if enabled { p.accent } else { p.raised })
@@ -91,7 +93,7 @@ pub fn quiet_button(ui: &mut Ui, p: &Palette, text: &str, enabled: bool) -> Resp
     let btn = egui::Button::new(
         egui::RichText::new(text)
             .size(BODY)
-            .color(if enabled { p.text } else { p.faint() })
+            .color(if enabled { p.text } else { p.dim })
             .family(theme::proportional()),
     )
     .fill(p.raised)
@@ -110,6 +112,9 @@ pub fn segmented(ui: &mut Ui, p: &Palette, options: &[(&str, bool)], enabled: bo
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = space::XS;
         for (i, (label, active)) in options.iter().enumerate() {
+            // `wrap_mode` off: a segmented control that wraps mid-word reads as
+            // two controls. The row is three short words; if it does not fit the
+            // card is too narrow, not the label too long.
             let text = egui::RichText::new(*label)
                 .size(BODY)
                 .color(if *active { p.shell } else { p.text })
@@ -118,7 +123,8 @@ pub fn segmented(ui: &mut Ui, p: &Palette, options: &[(&str, bool)], enabled: bo
                 .fill(if *active { p.accent } else { p.raised })
                 .stroke(Stroke::new(HAIRLINE, if *active { p.accent } else { p.border }))
                 .rounding(radius::CONTROL)
-                .min_size(Vec2::new(0.0, 30.0));
+                .min_size(Vec2::new(84.0, 30.0))
+                .wrap_mode(egui::TextWrapMode::Extend);
             if ui.add_enabled(enabled, btn).clicked() && !*active {
                 clicked = Some(i);
             }
@@ -142,7 +148,7 @@ pub fn empty(ui: &mut Ui, p: &Palette, reason: &str, hint: Option<&str>) {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
         ui.painter()
             .circle_stroke(rect.center(), 3.5, Stroke::new(1.2_f32, p.faint()));
-        ui.add_space(space::XS * 0.5);
+        ui.add_space(space::XS);
         ui.label(
             egui::RichText::new(reason)
                 .size(BODY)
@@ -151,6 +157,7 @@ pub fn empty(ui: &mut Ui, p: &Palette, reason: &str, hint: Option<&str>) {
         );
     });
     if let Some(h) = hint {
+        ui.add_space(space::XS);
         ui.label(
             egui::RichText::new(h)
                 .size(LABEL)
@@ -170,16 +177,6 @@ impl Palette {
 
 #[cfg(test)]
 mod tests {
-    /// The gauge clamps out-of-range fractions instead of drawing a negative or
-    /// over-long arc. This is checked on the arithmetic the painter uses.
-    #[test]
-    fn gauge_fraction_is_clamped() {
-        for raw in [-1.0_f32, -0.001, 0.0, 0.5, 1.0, 1.001, 9.0] {
-            let f = raw.clamp(0.0, 1.0);
-            assert!((0.0..=1.0).contains(&f));
-        }
-    }
-
     /// Meter fills must never exceed the track width, or the fill paints over the
     /// card border.
     #[test]
@@ -188,19 +185,6 @@ mod tests {
         for raw in [-2.0_f32, 0.0, 0.5, 1.0, 3.0] {
             let w = width * raw.clamp(0.0, 1.0);
             assert!((0.0..=width).contains(&w), "fill {w} outside 0..{width}");
-        }
-    }
-
-    /// The gauge arc must stay inside the allocated square: a radius larger than
-    /// half the diameter would paint over neighbouring widgets.
-    #[test]
-    fn gauge_radius_fits_the_allocation() {
-        for d in [80.0_f32, 140.0, 200.0] {
-            let r = d * 0.5 - 9.0;
-            let width = (d * 0.062).clamp(5.0, 11.0);
-            // Outer edge of the stroke.
-            assert!(r + width * 0.5 <= d * 0.5, "d={d} overflows");
-            assert!(r > 0.0, "d={d} has no radius");
         }
     }
 }

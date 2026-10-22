@@ -55,9 +55,9 @@ pub enum Column {
 pub fn two_columns(ui: &mut egui::Ui, mut body: impl FnMut(&mut egui::Ui, Column)) {
     let available = ui.available_width();
     let grid = theme::Grid::DEFAULT;
-    // A two-column row is two 6-column spans; going through `legal_span` means
-    // the layout cannot drift from the documented grid even if the constant
-    // changes.
+    // A two-column row is two 6-column spans. With `item_spacing` zeroed
+    // globally the math is exact: `span_w(available, 6)` is `available/2 - LG/2`,
+    // so `2*half + LG == available` and the halves align with the header.
     let span = theme::Grid::legal_span(6);
     let half = grid.span_w(available, span);
 

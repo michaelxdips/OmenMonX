@@ -48,6 +48,9 @@ impl App {
                 egui::vec2(ui.available_width(), 44.0),
                 egui::Sense::click(),
             );
+            resp.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Button, active, true, page.title())
+            });
             if ui.is_rect_visible(rect) {
                 let hovered = resp.hovered();
                 if active {
@@ -60,7 +63,18 @@ impl App {
                 } else if hovered {
                     ui.painter().rect_filled(rect, radius::CONTROL, p.tint(p.text, 12));
                 }
-                let icon_col = if active { p.accent } else { p.dim };
+                if resp.has_focus() {
+                    let inset = egui::vec2(2.0, 2.0);
+                    ui.painter().rect_stroke(
+                        rect.shrink2(inset),
+                        radius::CONTROL,
+                        egui::Stroke::new(2.0_f32, p.accent),
+                    );
+                }
+                // The label stays in the text colour even when active: accent on
+                // accent_soft is 4.08:1, below AA. The leading bar + fill carry
+                // the "active" state; the word must stay readable.
+                let icon_col = if active { p.text } else { p.dim };
                 let label = page.short();
                 ui.painter().text(
                     rect.center(),
@@ -81,21 +95,27 @@ impl App {
     /// One dot + one word, pinned to the rail bottom. Colour never stands alone.
     fn health_dot(&self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            let (col, text) = if st.bios_ok {
-                (p.green, "OK")
-            } else if st.elevated {
-                (p.red, "NO BIOS")
-            } else {
-                (p.amber, "RO")
-            };
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
-            ui.painter().circle_filled(rect.center(), 3.5, col);
-            ui.label(
-                egui::RichText::new(text)
-                    .size(LABEL)
-                    .color(p.dim)
-                    .family(theme::proportional()),
-            );
+            // `bottom_up` is a vertical layout: without this inner horizontal
+            // the dot stacks above the word instead of beside it.
+            ui.horizontal(|ui| {
+                let (col, text) = if st.bios_ok {
+                    (p.green, "OK")
+                } else if st.elevated {
+                    // "NO BIOS" clipped the 68 px rail; "BIOS" + red reads the same.
+                    (p.red, "BIOS")
+                } else {
+                    (p.amber, "RO")
+                };
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 3.5, col);
+                ui.add_space(space::XS);
+                ui.label(
+                    egui::RichText::new(text)
+                        .size(LABEL)
+                        .color(p.dim)
+                        .family(theme::proportional()),
+                );
+            });
         });
     }
 
@@ -109,6 +129,9 @@ impl App {
                     .color(p.text)
                     .family(theme::proportional()),
             );
+            // Not glued to the 32 pt title: one micro gap, and the label sits on
+            // the title's baseline so it does not read as floating.
+            ui.add_space(space::SM);
             ui.label(
                 egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                     .size(LABEL)
@@ -128,41 +151,53 @@ impl App {
     }
 
     /// One global write status. Per-card spinners are gone; the header owns it.
+    ///
+    /// The row is a fixed-height allocation: an in-flow label that appears and
+    /// disappears made the header jump ~20 px when a write started or expired.
     fn global_write_status(&self, ui: &mut egui::Ui, p: &Palette) {
         use crate::sampler::WriteOutcome as WO;
-        if let Some(started) = self.pending_since {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(
-                    egui::RichText::new(format!(
-                        "writing… {} ms",
-                        started.elapsed().as_millis()
-                    ))
-                    .size(LABEL)
-                    .color(p.amber)
-                    .family(theme::numeric()),
+        let w = ui.available_width();
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(w, 18.0), egui::Sense::hover());
+        let paint = |ui: &mut egui::Ui, pos: egui::Pos2| {
+            if let Some(started) = self.pending_since {
+                ui.painter().text(
+                    pos,
+                    egui::Align2::LEFT_CENTER,
+                    format!("writing… {} ms", started.elapsed().as_millis()),
+                    egui::FontId::new(LABEL, theme::numeric()),
+                    p.amber,
                 );
-            });
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(120));
-            return;
-        }
-        let st = self.sampler.state.lock();
-        let Some(wr) = st.last_write.as_ref() else { return };
-        let fresh = wr.at.elapsed().as_millis() < crate::ui::components::FLASH_MS as u128;
-        let (mark, word, colour) = match wr.outcome {
-            WO::Verified => ("✓", "verified", p.green),
-            WO::Adjusted => ("≈", "adjusted", p.amber),
-            WO::Failed => ("✗", "refused", p.red),
+                return;
+            }
+            let st = self.sampler.state.lock();
+            let Some(wr) = st.last_write.as_ref() else { return };
+            let fresh = wr.at.elapsed().as_millis() < crate::ui::components::FLASH_MS as u128;
+            let (mark, word, colour) = match wr.outcome {
+                WO::Verified => ("✓", "verified", p.green),
+                WO::Adjusted => ("≈", "adjusted", p.amber),
+                WO::Failed => ("✗", "refused", p.red),
+            };
+            let colour = if fresh { colour } else { colour.gamma_multiply(0.8) };
+            ui.painter().text(
+                pos,
+                egui::Align2::LEFT_CENTER,
+                format!("{mark} {word} · {}", wr.message),
+                egui::FontId::new(LABEL, theme::proportional()),
+                colour,
+            );
         };
-        let colour = if fresh { colour } else { colour.gamma_multiply(0.8) };
-        ui.label(
-            egui::RichText::new(format!("{mark} {word} · {}", wr.message))
-                .size(LABEL)
-                .color(colour)
-                .family(theme::proportional()),
-        );
-        if fresh {
+        paint(ui, rect.left_center());
+        if self.pending_since.is_some()
+            || self
+                .sampler
+                .state
+                .lock()
+                .last_write
+                .as_ref()
+                .map(|wr| wr.at.elapsed().as_millis() < crate::ui::components::FLASH_MS as u128)
+                .unwrap_or(false)
+        {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(120));
         }
@@ -175,6 +210,11 @@ impl App {
             Ok(()) => {
                 self.persist_window(ctx);
                 self.sampler.stop();
+                // The replacement process is starting; this close must actually
+                // quit, not hide to tray, or the tray holds a zombie while the
+                // elevated copy runs. `quitting` is the flag `should_hide_on_close`
+                // checks.
+                self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Err(e) => self.rate_msg = Some((format!("elevation: {e}"), false)),
@@ -195,12 +235,14 @@ impl App {
                 .family(theme::proportional()),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if w::quiet_button(ui, p, "Dismiss", true).clicked() {
-                    safety::clear();
-                    self.recover = None;
-                }
+                // right_to_left puts the FIRST child rightmost; the primary
+                // action leads the call so it lands trailing (standard order).
                 if w::primary_button(ui, p, "Restore stock", true).clicked() {
                     self.write(crate::sampler::ControlRequest::RestoreDefault);
+                    self.recover = None;
+                }
+                if w::quiet_button(ui, p, "Dismiss", true).clicked() {
+                    safety::clear();
                     self.recover = None;
                 }
             });
@@ -235,7 +277,7 @@ impl App {
                         .family(theme::numeric()),
                 );
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if w::quiet_button(ui, p, "Dismiss", true).clicked() {
                     self.crashed = None;
                 }

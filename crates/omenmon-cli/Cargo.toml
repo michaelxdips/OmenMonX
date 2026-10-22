@@ -13,9 +13,6 @@ path = "src/main.rs"
 name = "omenmon_cli"
 path = "src/lib.rs"
 
-[features]
-default = []
-
 [dependencies]
 hp-wmi = { path = "../hp-wmi" }
 hp-ec = { path = "../hp-ec" }

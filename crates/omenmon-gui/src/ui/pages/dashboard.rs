@@ -43,6 +43,8 @@ impl App {
                     Some("0x23 needs an elevated token; battery readings still work"),
                 );
                 ui.add_space(space::SM);
+                thermal_stat(ui, p, st);
+                return;
             }
             ui.horizontal(|ui| {
                 w::stat(
@@ -79,7 +81,6 @@ impl App {
             thermal_stat(ui, p, st);
         });
     }
-
     fn cap_stat(&self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
         let cap = st.limits.map(|l| l.pl1);
         let ceiling = st
@@ -258,21 +259,24 @@ impl App {
                         .collect()
                 })
                 .collect();
+            // Series identity is not colour-only: a legend names every fan, and
+            // the palette cycles through four distinguishable channels.
+            let palette = [p.cpu, p.gpu, p.text, p.dim];
             Plot::new("fw_curve")
                 .height(132.0)
                 .allow_boxed_zoom(false)
                 .allow_scroll(false)
                 .allow_drag(false)
                 .allow_zoom(false)
+                .legend(egui_plot::Legend::default())
                 .x_axis_label("level")
                 .y_axis_label("duty %")
                 .show(ui, |pl| {
                     for (f, pts) in series.iter().enumerate() {
-                        let colour = if f == 0 { p.cpu } else { p.gpu };
                         pl.line(
                             Line::new(PlotPoints::from(pts.clone()))
                                 .name(format!("fan{}", f + 1))
-                                .color(colour)
+                                .color(palette[f % palette.len()])
                                 .width(2.0_f32),
                         );
                     }

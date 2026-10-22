@@ -1,7 +1,6 @@
 //! daemon module (included by main.rs as `mod daemon`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn log_dir() -> std::path::PathBuf {
@@ -26,24 +25,73 @@ struct InstanceGuard {
 }
 
 impl InstanceGuard {
+    /// Parse `tasklist /FI "PID eq N"` output and match the PID as a whole
+    /// token. `String::contains` matched 123 inside 1234 or 5123, so a stale
+    /// lock for a dead PID could pass as alive and block startup.
+    fn pid_alive(pid: u32) -> bool {
+        let needle = format!(" {pid} "); // tasklist columns are space-separated
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .any(|tok| tok == pid.to_string())
+                    || String::from_utf8_lossy(&o.stdout).contains(&needle)
+            })
+            .unwrap_or(false)
+    }
+
     fn acquire() -> anyhow::Result<Self> {
         let path = log_dir().join("daemon.lock");
+        // Atomic creation first: two daemons starting together must not both
+        // win. Only when the lock already exists do we run the stale-pid check.
+        std::fs::create_dir_all(log_dir())?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => {
+                std::fs::write(&path, std::process::id().to_string())?;
+                return Ok(Self { path });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // fall through to the stale check
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let mut stale = true;
         if let Ok(txt) = std::fs::read_to_string(&path) {
             if let Ok(pid) = txt.trim().parse::<u32>() {
-                // stale check: is that pid alive?
-                let alive = std::process::Command::new("tasklist")
-                    .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-                    .unwrap_or(false);
-                if alive {
+                stale = !Self::pid_alive(pid);
+                if !stale {
                     anyhow::bail!("OmenMon daemon already running (pid {pid})");
                 }
             }
         }
-        std::fs::create_dir_all(log_dir())?;
-        std::fs::write(&path, std::process::id().to_string())?;
-        Ok(Self { path })
+        if stale {
+            // Abandoned lock (crashed owner / WAIT_ABANDONED-style): delete and
+            // recreate atomically. A concurrent starter may have recreated it
+            // first; that race loses cleanly.
+            let _ = std::fs::remove_file(&path);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => {
+                    std::fs::write(&path, std::process::id().to_string())?;
+                    Ok(Self { path })
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    anyhow::bail!("OmenMon daemon already running (lock recreated)");
+                }
+                Err(e) => Err(e.into()),
+            }
+        } else {
+            unreachable!("live pid bailed above")
+        }
     }
 }
 
@@ -60,18 +108,32 @@ pub fn run() -> anyhow::Result<()> {
     let dir = log_dir();
     std::fs::create_dir_all(&dir)?;
     let log_path = dir.join("daemon.log");
-    let log = |msg: &str| {
+    let mut log_failure_reported = false;
+    let mut log = move |msg: &str| {
+        use std::io::Write;
         let line = format!("{} {msg}\n", ts());
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-            use std::io::Write;
-            let _ = f.write_all(line.as_bytes());
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut f| f.write_all(line.as_bytes()))
+        {
+            Ok(()) => log_failure_reported = false,
+            Err(e) => {
+                // A permanently failing log used to be silent forever; report it
+                // to stderr once so a broken install is diagnosable.
+                if !log_failure_reported {
+                    log_failure_reported = true;
+                    eprintln!("omenmon daemon: log append failed: {e}");
+                }
+            }
         }
     };
 
     log(&format!("daemon start v{}", env!("CARGO_PKG_VERSION")));
 
     let cfg = hp_core::Config::load();
-    let engine = Arc::new(hp_core::engine::Engine::new(cfg.clone()));
+    let engine = hp_core::engine::Engine::new(cfg.clone());
     let bios = match hp_wmi::Bios::connect() {
         Ok(b) => b,
         Err(e) => {
@@ -105,11 +167,12 @@ pub fn run() -> anyhow::Result<()> {
 
     let poll_ms = cfg.profile.poll_ms.max(250) as u64;
     let mut last_battery = Instant::now();
+    let mut last_temp_log = Instant::now();
+    let temp_log_every = Duration::from_secs(3600);
 
     log("loop start");
     while !STOP.load(Ordering::Relaxed) {
         let st = engine.poll(&bios, io.as_ref());
-
         if last_battery.elapsed() >= Duration::from_secs(30) {
             last_battery = Instant::now();
             let b = hp_core::battery::read_battery();
@@ -127,9 +190,20 @@ pub fn run() -> anyhow::Result<()> {
             }
         }
 
-        // fan EC write hook: activates when signed PawnIO ECMMIO module ships.
-        if st.fan_write_active {
-            // TODO(ecmp): safe-write level once hp_ec::ecmp lands.
+        // Fan EC write hook is pending hp_ec::ecmp_mmio / Hpecmp signing; until
+        // the signed PawnIO ECMMIO module ships there is nothing safe to write.
+        // The poll above keeps temps flowing; one line an hour keeps the log
+        // from being a dead file.
+        if last_temp_log.elapsed() >= temp_log_every {
+            last_temp_log = Instant::now();
+            log(&format!(
+                "temps: cpu {:?} gpu {:?} fan {}%",
+                st.sample.cpu, st.sample.gpu,
+                st.sample
+                    .fan_level_pct
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".into())
+            ));
         }
 
         std::thread::sleep(Duration::from_millis(poll_ms));
@@ -160,13 +234,20 @@ fn ctrlc(f: impl Fn() + Send + 'static) -> Result<(), Box<dyn std::error::Error>
         }
     });
     unsafe extern "system" fn handler(t: u32) -> i32 {
-        if t == 0 {
-            // CTRL_C_EVENT
+        // CTRL_C_EVENT=0, CTRL_CLOSE_EVENT=2, CTRL_SHUTDOWN_EVENT=5. Close and
+        // shutdown must run the cleanup path too: a terminal close used to
+        // bypass it and leave the lock file behind. Close/shutdown give the
+        // process a limited grace window, so signal STOP and ask the system to
+        // end (return 1 keeps our handler authoritative).
+        if matches!(t, 0 | 2 | 5) {
             HANDLER_FIRED.store(true, Ordering::SeqCst);
-            1
-        } else {
-            0
+            if t != 0 {
+                STOP.store(true, Ordering::SeqCst);
+                return 1;
+            }
+            return 1;
         }
+        0
     }
     unsafe {
         if SetConsoleCtrlHandler(Some(handler), 1) == 0 {

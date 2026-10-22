@@ -11,8 +11,18 @@ const INSTALL_DIR: &str = r"C:\Program Files\OmenMon";
 const TASK_NAME: &str = "OmenMonTelemetry";
 
 fn main() -> anyhow::Result<()> {
-    let action = std::env::args().nth(1).unwrap_or_else(|| "install".into());
-    match action.as_str() {
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if args.len() > 1 {
+        anyhow::bail!(
+            "unexpected extra arguments ({:?}); usage: omenmon-setup [install|uninstall]",
+            &args[1..]
+        );
+    }
+    let action = args.first().map(String::as_str).unwrap_or("install");
+    match action {
         "install" => install()?,
         "uninstall" => uninstall()?,
         // `--help` and `-h` are what a user types first. Answering them with an
@@ -40,8 +50,14 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn exe_dir() -> PathBuf {
-    std::env::current_exe().unwrap().parent().unwrap().to_path_buf()
+fn exe_dir() -> anyhow::Result<PathBuf> {
+    // No unwraps: running from a context without an exe path (some service
+    // hosts) must produce an error, not a panic with no output.
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("cannot determine installer location: {e}"))?;
+    exe.parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| anyhow::anyhow!("installer path has no parent directory"))
 }
 
 /// The PowerShell that registers the logon task.
@@ -78,9 +94,19 @@ fn install() -> anyhow::Result<()> {
     }
 
     // 1. copy binaries
+    let exe_dir = exe_dir()?;
     std::fs::create_dir_all(INSTALL_DIR)?;
+    // A missing omenmon.exe must stop the install: the logon task runs it, so a
+    // silent skip produced a broken scheduled task that failed every logon.
+    let main_exe = exe_dir.join("omenmon.exe");
+    if !main_exe.exists() {
+        bail!(
+            "omenmon.exe not found next to the installer ({})",
+            exe_dir.display()
+        );
+    }
     for name in ["omenmon.exe", "omenmon-gui.exe", "omenmon-setup.exe"] {
-        let src = exe_dir().join(name);
+        let src = exe_dir.join(name);
         if src.exists() {
             std::fs::copy(&src, PathBuf::from(INSTALL_DIR).join(name))?;
             println!("installed  {INSTALL_DIR}\\{name}");
@@ -105,12 +131,16 @@ fn install() -> anyhow::Result<()> {
                 gui.display(),
                 INSTALL_DIR
             );
-            let out = Command::new("powershell")
+            // Full path: a stripped-down environment (logon context) does not
+            // always resolve `powershell` on PATH.
+            let out = Command::new(powershell())
                 .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
                 .output()?;
             if out.status.success() {
                 println!("autostart  GUI shortcut -> {}", lnk.display());
             } else {
+                // Non-fatal: the GUI autostart is a convenience, not the cap
+                // re-apply path (that is the scheduled task below).
                 println!("autostart  GUI shortcut FAILED (non-fatal)");
             }
         }
@@ -121,7 +151,7 @@ fn install() -> anyhow::Result<()> {
 
     // 3. scheduled task via PowerShell ScheduledTasks module (robust quoting)
     let ps = logon_task_script();
-    let out = Command::new("powershell")
+    let out = Command::new(powershell())
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
         .output()?;
     if !out.status.success() {
@@ -142,7 +172,7 @@ fn install() -> anyhow::Result<()> {
          Set-ItemProperty -Path $k -Name UninstallString -Value '\"{}\" uninstall'; \
          Set-ItemProperty -Path $k -Name NoModify -Value 1 -Type DWord"
     , env!("CARGO_PKG_VERSION"), uninstaller.display());
-    let out = Command::new("powershell")
+    let out = Command::new(powershell())
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
         .output()?;
     if !out.status.success() {
@@ -170,14 +200,19 @@ fn uninstall() -> anyhow::Result<()> {
         );
     }
 
-    run(&format!("schtasks /Delete /F /TN {TASK_NAME}"))?;
+    // Idempotent: a partial install must still clean up, so "task not found"
+    // and "key not found" are successes. The old strict check made every
+    // cleanup after a failed install fail with an error the user could do
+    // nothing about.
+    run_idempotent(&format!("schtasks /Delete /F /TN {TASK_NAME}"));
     let _ = Command::new("schtasks").args(["/Delete", "/F", "/TN", "OmenMonRunner"]).output();
-    run("reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OmenMon-rs /f")?;
+    run_idempotent("reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OmenMon-rs /f");
 
     // Remove every binary the installer put there. The list previously omitted
     // omenmon-gui.exe, so uninstall left the largest file behind and the install
     // directory could never be removed - a reinstall then inherited a stale GUI.
-    for name in ["omenmon.exe", "omenmon-gui.exe", "omenmon-setup.exe", "status.log"] {
+    // status.log is not in the list: nothing in this project creates it.
+    for name in ["omenmon.exe", "omenmon-gui.exe", "omenmon-setup.exe"] {
         let p = PathBuf::from(INSTALL_DIR).join(name);
         if p.exists() {
             if let Err(e) = std::fs::remove_file(&p) {
@@ -220,8 +255,29 @@ fn run(cmd: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Like [`run`], but treats "does not exist" as success (uninstall idempotency).
+fn run_idempotent(cmd: &str) {
+    match run(cmd) {
+        Ok(()) => {}
+        Err(e) => {
+            let text = e.to_string();
+            let not_found = text.contains("does not exist")
+                || text.contains("cannot find")
+                || text.contains("not found")
+                || text.contains("unable to find");
+            if not_found {
+                println!("absent     (already removed: {cmd})");
+            } else {
+                println!("warning: {cmd} -> {text}");
+            }
+        }
+    }
+}
+
+/// The elevation probe. The write probe creates Program Files\OmenMon, which
+/// uninstall must not do — so uninstall skips it entirely and relies on the
+/// real command failing with an access error if the token is missing.
 fn is_elevated() -> bool {
-    // cheap elevation probe: write to Program Files
     let probe = PathBuf::from(INSTALL_DIR).join(".probe");
     match std::fs::create_dir_all(INSTALL_DIR).and_then(|_| std::fs::write(&probe, b"x")) {
         Ok(()) => {
@@ -232,12 +288,23 @@ fn is_elevated() -> bool {
     }
 }
 
+/// Full path to Windows PowerShell. A logon-context PATH does not always
+/// resolve bare `powershell`.
+fn powershell() -> String {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    format!("{root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+}
+
 fn add_to_user_path(dir: &str) -> anyhow::Result<()> {
-    // Use PowerShell to read/append user PATH robustly (no setx quoting traps)
+    // Use PowerShell to read/append user PATH robustly (no setx quoting traps).
+    // Handles an empty existing Path: appending ";dir" to "" would start the
+    // variable with a leading ';' that some tools mishandle.
     let script = format!(
-        "$p=[Environment]::GetEnvironmentVariable('Path','User'); if($p -notlike '*{dir}*'){{[Environment]::SetEnvironmentVariable('Path', \"$p;{dir}\", 'User')}}"
+        "$p=[Environment]::GetEnvironmentVariable('Path','User'); \
+         $new = if([string]::IsNullOrEmpty($p)){{'{dir}'}}else{{if($p -notlike '*{dir}*'){{\"$p;{dir}\"}}else{{$p}}}}; \
+         if($new -ne $p){{[Environment]::SetEnvironmentVariable('Path', $new, 'User')}}"
     );
-    let out = Command::new("powershell")
+    let out = Command::new(powershell())
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
         .output()?;
     if !out.status.success() {

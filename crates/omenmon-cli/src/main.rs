@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 use hp_wmi::Bios;
-use hp_core as _;
 
 mod console;
 mod daemon {
@@ -22,7 +21,7 @@ enum Command {
     Probe,
     /// Read all temperature sensors
     Temps,
-    /// Show fan info (count, type, level)
+    /// Show fan count and per-fan level
     Fans,
     /// Battery health, wear, charge state
     Battery,
@@ -52,9 +51,10 @@ enum Command {
     },
     /// Keyboard color table: show, or set one zone's RGB
     Kbd {
-        /// Show the color table, or a zone number 0..3 to set
+        /// Zone number 0..3 to set (required with --color); omit both to show
+        /// the table
         zone: Option<u8>,
-        /// Hex color like FF8800 (only with --zone)
+        /// Hex color like FF8800 or 0xFF8800 (requires a zone)
         #[arg(long)]
         color: Option<String>,
     },
@@ -70,7 +70,7 @@ enum Command {
         #[arg(long)]
         set: Option<String>,
     },
-    /// Long-running daemon (single-instance, battery alerts, curve loop)
+    /// Long-running daemon (single-instance monitoring, battery alerts)
     Daemon,
 }
 
@@ -269,6 +269,15 @@ fn power() -> anyhow::Result<()> {
 /// made an earlier build throttle a brick-powered machine to 25 W.
 fn power_cap(watts: u8) -> anyhow::Result<()> {
     use hp_wmi::CpuPowerLimits;
+    // Client-side floor: the firmware accepts nonsense below this and throttles
+    // the machine to it. Refuse before any write happens.
+    if watts < CpuPowerLimits::MIN_WATTS {
+        anyhow::bail!(
+            "{} W is below the minimum ({}) W; refusing to under-volt the package",
+            watts,
+            CpuPowerLimits::MIN_WATTS
+        );
+    }
     let b = bios()?;
 
     // Read the block first: it carries the supply profile.
@@ -509,6 +518,12 @@ fn bios_settings(name: Option<&str>, set: Option<&str>) -> anyhow::Result<()> {
                 hp_wmi::SetResult::Other(c) => {
                     println!("Unexpected return code {c}; nothing was assumed.");
                 }
+                hp_wmi::SetResult::Plumbing => {
+                    println!(
+                        "The firmware did not report a return code (rwReturnCode absent).\n\
+                         Nothing was written or the write could not be confirmed; nothing was assumed."
+                    );
+                }
             }
         }
     }
@@ -547,6 +562,9 @@ fn fan(setting: Option<&str>) -> anyhow::Result<()> {
             println!("run `omenmon fan auto` to hand the fans back to the firmware");
         }
         Some("auto") | Some("release") => {
+            if setting == Some("release") {
+                println!("note: 'release' is an undocumented alias for 'auto'; prefer `omenmon fan auto`");
+            }
             let after = b.release_max_fan()?;
             std::thread::sleep(std::time::Duration::from_millis(1500));
             let settled = b.fan_levels()?.0;
@@ -624,7 +642,11 @@ fn thermal(mode: Option<&str>) -> anyhow::Result<()> {
 fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
     let b = bios()?;
     match (zone, color) {
-        (None, _) => {
+        // --color without a zone is a usage error, not a show request: the user
+        // meant to write, and silently printing the table would look like the
+        // command did nothing.
+        (None, Some(_)) => anyhow::bail!("--color needs a zone: omenmon kbd <0-3> --color <hex>"),
+        (None, None) => {
             let r = b.get_color_table()?;
             let d = &r.data;
             println!("color table ({} bytes), zone colors at 0x1A + 3*i:", d.len());
@@ -639,8 +661,18 @@ fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
             if z > 3 {
                 anyhow::bail!("zone must be 0..3");
             }
-            let c = u32::from_str_radix(hex.trim_start_matches("0x"), 16)
+            let hex = hex
+                .strip_prefix("0x")
+                .or_else(|| hex.strip_prefix("0X"))
+                .unwrap_or(hex);
+            if hex.len() != 6 {
+                anyhow::bail!("bad hex color '{hex}' (expected 6 hex digits, e.g. FF8800)");
+            }
+            let c = u32::from_str_radix(hex, 16)
                 .map_err(|_| anyhow::anyhow!("bad hex color '{hex}'"))?;
+            if c > 0xFFFFFF {
+                anyhow::bail!("color value 0x{c:X} exceeds 24-bit RGB (max 0xFFFFFF)");
+            }
             // safe-write: read -> modify -> write -> verify -> restore on failure
             let orig = b.get_color_table()?.data;
             if orig.len() < 0x2A {
@@ -654,7 +686,8 @@ fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
             b.set_color_table(&tbl)?;
             std::thread::sleep(std::time::Duration::from_millis(300));
             let now = b.get_color_table()?.data;
-            if now[o..o + 3] == tbl[o..o + 3] {
+            // A truncated WMI readback panicked here once; bounds-check first.
+            if now.len() >= o + 3 && now[o..o + 3] == tbl[o..o + 3] {
                 println!("zone {z} set to {hex}  -  verified by readback");
             } else {
                 println!("readback mismatch; attempting restore");
