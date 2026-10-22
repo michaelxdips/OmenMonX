@@ -17,8 +17,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Probe hardware capabilities and print the feature matrix
-    Probe,
+    /// Probe hardware capabilities and print the feature matrix.
+    ///
+    /// With --json, prints one JSON object: every probe as a
+    /// {name, status, detail} row, plus board context. Machine-readable on
+    /// purpose — attach it to a compatibility issue.
+    Probe {
+        /// Machine-readable JSON output (one object, one line).
+        #[arg(long)]
+        json: bool,
+    },
     /// Read all temperature sensors
     Temps,
     /// Show fan count and per-fan level
@@ -84,7 +92,7 @@ fn main() -> anyhow::Result<()> {
     console::init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Probe => probe()?,
+        Command::Probe { json } => probe(json)?,
         Command::Temps => temps()?,
         Command::Fans => fans()?,
         Command::Battery => battery()?,
@@ -761,99 +769,152 @@ fn bios() -> anyhow::Result<Bios> {
     })
 }
 
-fn probe() -> anyhow::Result<()> {
-    println!("omenmon probe  -  HP WMI BIOS capability matrix");
-    println!("{}", "=".repeat(55));
-    let b = bios()?;
+/// One probe row. `ok` is tri-state: `true` (works), `false` (firmware
+/// refused / transport error) or `null` (not applicable on this machine).
+#[derive(serde::Serialize)]
+struct ProbeRow {
+    name: String,
+    ok: Option<bool>,
+    detail: String,
+}
 
-    println!("hpqBIntM instance:        OK (connected)");
+impl ProbeRow {
+    fn ok(name: &str, detail: String) -> Self {
+        Self { name: name.into(), ok: Some(true), detail }
+    }
+    fn fail(name: &str, detail: String) -> Self {
+        Self { name: name.into(), ok: Some(false), detail }
+    }
+}
+
+fn probe(json: bool) -> anyhow::Result<()> {
+    let mut rows: Vec<ProbeRow> = Vec::new();
+    let b = match Bios::connect() {
+        Ok(b) => b,
+        Err(e) => {
+            if json {
+                let out = serde_json::json!({
+                    "probe": "omenmon",
+                    "connected": false,
+                    "error": e.to_string(),
+                });
+                println!("{out}");
+                return Ok(());
+            }
+            // Human path: reuse the elevation-aware translation.
+            let _ = bios()?;
+            unreachable!("bios() only errors when connect() errors");
+        }
+    };
+    let connected = ProbeRow::ok("hpqBIntM", "connected".into());
+    rows.push(connected);
 
     match b.get_system_data() {
-        Ok(s) => {
-            println!("GetSystem (0x28):         OK");
-            println!("  StatusFlags:            0x{:04X}  (PPAB bits: 3/4/8 = {}/{}/{})",
-                s.status_flags,
-                s.status_flags & 0x0008 != 0,
-                s.status_flags & 0x0010 != 0,
-                s.status_flags & 0x0100 != 0);
-            println!("  ThermalPolicy:           {} ({})", s.thermal_policy,
-                if s.thermal_policy_v1() { "V1 - mode remap applies" } else { "legacy V0" });
-            println!("  SupportFlags:            0x{:02X}  SwFanCtl={} ExtremeMode={} TwoBytePL4={}",
-                s.support_flags, s.sw_fan_control(), s.extreme_mode(), s.two_byte_pl4());
-            println!("  DefaultPL4:              {} W", s.default_pl4);
-            println!("  BiosOc:                  {} ({})", s.bios_oc,
-                if s.bios_oc_supported() { "supported" } else { "NOT supported" });
-            println!("  GpuModeSwitch:           0x{:02X}", s.gpu_mode_switch);
-            println!("  DefaultPLwGpu:           {} W", s.default_pl_with_gpu);
-        }
-        Err(e) => println!("GetSystem (0x28):         FAIL - {e}"),
+        Ok(s) => rows.push(ProbeRow::ok("GetSystem_0x28", format!(
+            "status_flags=0x{:04X} thermal_policy={} v1={} support_flags=0x{:02X} \
+             sw_fan_ctl={} extreme_mode={} two_byte_pl4={} default_pl4={}W \
+             bios_oc={} gpu_mode_switch=0x{:02X} default_pl_wgpu={}W",
+            s.status_flags,
+            s.thermal_policy,
+            s.thermal_policy_v1(),
+            s.support_flags,
+            s.sw_fan_control(),
+            s.extreme_mode(),
+            s.two_byte_pl4(),
+            s.default_pl4,
+            s.bios_oc_supported(),
+            s.gpu_mode_switch,
+            s.default_pl_with_gpu,
+        ))),
+        Err(e) => rows.push(ProbeRow::fail("GetSystem_0x28", e.to_string())),
     }
     match b.get_fan_count() {
-        Ok(n) => println!("GetFanCount (0x10):       OK  -  {n} fan(s)"),
-        Err(e) => println!("GetFanCount (0x10):       FAIL  -  {e}"),
+        Ok(n) => rows.push(ProbeRow::ok("GetFanCount_0x10", format!("{n} fan(s)"))),
+        Err(e) => rows.push(ProbeRow::fail("GetFanCount_0x10", e.to_string())),
     }
     match b.get_fan_type() {
-        Ok(r) => {
-            let t = r.byte0().unwrap_or(0);
-            println!("GetFanType (0x2C):        OK  -  byte0=0x{t:02X} (nibbles: 1=CPU 2=GPU 3=exhaust 4=pump 5=intake)");
-        }
-        Err(e) => println!("GetFanType (0x2C):        FAIL  -  {e}"),
+        Ok(r) => rows.push(ProbeRow::ok("GetFanType_0x2C", format!(
+            "byte0=0x{:02X} (nibbles: 1=CPU 2=GPU 3=exhaust 4=pump 5=intake)",
+            r.byte0().unwrap_or(0)
+        ))),
+        Err(e) => rows.push(ProbeRow::fail("GetFanType_0x2C", e.to_string())),
     }
     match b.get_fan_level() {
         Ok(r) => {
-            let hex: Vec<String> = r.data.iter().take(8).map(|b| format!("{b:02X}")).collect();
-            println!("GetFanLevel (0x2D):       OK  -  [{}]", hex.join(" "));
+            let hex: Vec<String> = r.data.iter().take(8).map(|v| format!("{v:02X}")).collect();
+            rows.push(ProbeRow::ok("GetFanLevel_0x2D", format!("[{}]", hex.join(" "))));
         }
-        Err(e) => println!("GetFanLevel (0x2D):       FAIL  -  {e}"),
+        Err(e) => rows.push(ProbeRow::fail("GetFanLevel_0x2D", e.to_string())),
     }
     match b.get_max_fan() {
-        Ok(r) => println!("GetMaxFan (0x26):         OK  -  {}", r.byte0().unwrap_or(0)),
-        Err(e) => println!("GetMaxFan (0x26):         FAIL  -  {e}"),
+        Ok(r) => rows.push(ProbeRow::ok("GetMaxFan_0x26", r.byte0().unwrap_or(0).to_string())),
+        Err(e) => rows.push(ProbeRow::fail("GetMaxFan_0x26", e.to_string())),
     }
     match b.get_gpu_power() {
-        Ok(r) => println!("GetGpuPower (0x21):       OK  -  bytes {:02X?}", &r.data[..r.data.len().min(4)]),
-        Err(e) => println!("GetGpuPower (0x21):       FAIL  -  {e}"),
+        Ok(r) => rows.push(ProbeRow::ok("GetGpuPower_0x21", format!(
+            "{:02X?}", &r.data[..r.data.len().min(4)]
+        ))),
+        Err(e) => rows.push(ProbeRow::fail("GetGpuPower_0x21", e.to_string())),
     }
     match b.get_gpu_mode() {
-        Ok(r) => println!("GetGpuMode (0x52):        OK  -  {}", r.byte0().unwrap_or(0)),
-        Err(e) => println!("GetGpuMode (0x52):        FAIL  -  {e}"),
+        Ok(r) => rows.push(ProbeRow::ok("GetGpuMode_0x52", r.byte0().unwrap_or(0).to_string())),
+        Err(e) => rows.push(ProbeRow::fail("GetGpuMode_0x52", e.to_string())),
     }
     match b.get_fan_table() {
-        Ok(r) => println!("GetFanTable (0x2F):       OK  -  {} bytes", r.data.len()),
-        Err(e) => println!("GetFanTable (0x2F):       FAIL  -  {e}"),
+        Ok(r) => rows.push(ProbeRow::ok("GetFanTable_0x2F", format!("{} bytes", r.data.len()))),
+        Err(e) => rows.push(ProbeRow::fail("GetFanTable_0x2F", e.to_string())),
     }
     match b.has_backlight() {
-        Ok(v) => println!("HasBacklight (kbd 1):     OK  -  {v}"),
-        Err(e) => println!("HasBacklight (kbd 1):     FAIL  -  {e}"),
+        Ok(v) => rows.push(ProbeRow::ok("HasBacklight_kbd1", v.to_string())),
+        Err(e) => rows.push(ProbeRow::fail("HasBacklight_kbd1", e.to_string())),
     }
     match b.get_kbd_type() {
-        Ok(v) => println!("GetKbdType (0x2B):        OK  -  {v}"),
-        Err(e) => println!("GetKbdType (0x2B):        FAIL  -  {e}"),
+        Ok(v) => rows.push(ProbeRow::ok("GetKbdType_0x2B", v.to_string())),
+        Err(e) => rows.push(ProbeRow::fail("GetKbdType_0x2B", e.to_string())),
     }
     match b.get_color_table() {
         Ok(r) => {
-            let hex: Vec<String> = r.data.iter().take(16).map(|b| format!("{b:02X}")).collect();
-            println!("GetColorTable (kbd 2):    OK  -  [{}...]", hex.join(" "));
+            let hex: Vec<String> = r.data.iter().take(16).map(|v| format!("{v:02X}")).collect();
+            rows.push(ProbeRow::ok("GetColorTable_kbd2", format!("[{}]...", hex.join(" "))));
         }
-        Err(e) => println!("GetColorTable (kbd 2):    FAIL  -  {e}"),
+        Err(e) => rows.push(ProbeRow::fail("GetColorTable_kbd2", e.to_string())),
     }
     match b.get_backlight() {
-        Ok(v) => println!("GetBacklight (kbd 4):     OK  -  0x{v:02X}"),
-        Err(e) => println!("GetBacklight (kbd 4):     FAIL  -  {e}"),
+        Ok(v) => rows.push(ProbeRow::ok("GetBacklight_kbd4", format!("0x{v:02X}"))),
+        Err(e) => rows.push(ProbeRow::fail("GetBacklight_kbd4", e.to_string())),
     }
 
-    // Temperature  -  brute force sensor selectors
-    println!("\nGetTemperature (0x23) sensor probe:");
     for sensor in [0u8, 1, 2, 3, 4, 0xFF] {
+        let name = format!("GetTemperature_0x23_sensor{sensor}");
         match b.get_temperature(sensor) {
-            Ok(r) => {
-                if r.is_ok() {
-                    println!("  sensor {sensor:3}: OK  -  {} (raw {:02X?})", r.byte0().unwrap_or(0), &r.data[..r.data.len().min(4)]);
-                } else {
-                    println!("  sensor {sensor:3}: rwret={}", r.return_code);
-                }
-            }
-            Err(e) => println!("  sensor {sensor:3}: FAIL  -  {e}"),
+            Ok(r) if r.is_ok() => rows.push(ProbeRow::ok(&name, format!(
+                "{} C (raw {:02X?})",
+                r.byte0().unwrap_or(0),
+                &r.data[..r.data.len().min(4)]
+            ))),
+            Ok(r) => rows.push(ProbeRow::fail(&name, format!("rwret={}", r.return_code))),
+            Err(e) => rows.push(ProbeRow::fail(&name, e.to_string())),
+        }
+    }
+
+    if json {
+        let out = serde_json::json!({
+            "probe": "omenmon",
+            "board_context": "verified on 8C9C only; other boards are unmeasured",
+            "connected": true,
+            "rows": rows,
+        });
+        println!("{out}");
+    } else {
+        println!("omenmon probe  -  HP WMI BIOS capability matrix");
+        println!("{}", "=".repeat(55));
+        for r in &rows {
+            let mark = match r.ok {
+                Some(true) => "OK  ",
+                Some(false) => "FAIL",
+                None => "n/a ",
+            };
+            println!("{:<26} {}  {}", r.name, mark, r.detail);
         }
     }
     Ok(())

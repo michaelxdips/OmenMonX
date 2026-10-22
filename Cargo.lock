@@ -2121,6 +2121,8 @@ dependencies = [
  "hp-core",
  "hp-ec",
  "hp-wmi",
+ "serde",
+ "serde_json",
  "windows 0.58.0",
  "wmi",
 ]
