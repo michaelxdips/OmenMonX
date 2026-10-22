@@ -19,14 +19,79 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Type scale, in points. Fixed steps so the eye learns them.
+///
+/// Nothing else is a valid font size. A literal size in a page file is a bug:
+/// it is how a UI ends up with eleven slightly different labels that read as
+/// noise rather than hierarchy.
 pub const DISPLAY: f32 = 40.0;
 pub const HERO: f32 = 32.0;
 pub const VALUE: f32 = 19.0;
 pub const BODY: f32 = 13.5;
 pub const LABEL: f32 = 11.0;
 
+/// Page-title size. Sits between [`HERO`] and [`DISPLAY`] in the scale and is
+/// named rather than written as `DISPLAY * 0.62` at the call site.
+pub const TITLE: f32 = 24.0;
+
+/// Spacing scale. Every gap is one of these; 4 / 8 / 12 / 16 / 24 / 32 and
+/// nothing in between.
+pub mod space {
+    /// 4 — inside a tight pair (label to its value).
+    pub const XS: f32 = 4.0;
+    /// 8 — inside a card between rows.
+    pub const SM: f32 = 8.0;
+    /// 12 — between stacked cards.
+    pub const MD: f32 = 12.0;
+    /// 16 — card padding, gutter.
+    pub const LG: f32 = 16.0;
+    /// 24 — between page sections.
+    pub const XL: f32 = 24.0;
+    /// 32 — page margins, hero separation.
+    pub const XXL: f32 = 32.0;
+}
+
+/// Corner radii. Three values, each with one job.
+pub mod radius {
+    /// 6 — controls: buttons, inputs, pills that are not fully round.
+    pub const CONTROL: f32 = 6.0;
+    /// 10 — cards and other raised surfaces.
+    pub const CARD: f32 = 10.0;
+    /// Fully round. Used for pills and status dots.
+    pub const PILL: f32 = 999.0;
+}
+
+/// Hairline width. One pixel at every DPI, never two.
+pub const HAIRLINE: f32 = 1.0;
+
 /// Sidebar width. Wide enough for "Performance" at the body size.
 pub const RAIL_W: f32 = 212.0;
+
+/// The two elevations in the app, expressed as the frame each one draws.
+///
+/// Two levels only, and neither is a drop shadow: a hairline border does the work
+/// a shadow would do on Windows 11, and it survives the DPI scaling that turns a
+/// 1 px shadow into a grey smear. [`raised`] is what every card uses; [`flat`] is
+/// for surfaces that sit directly on the page (table rows, the header strip).
+pub mod elevation {
+    use super::{radius, space, Palette, HAIRLINE};
+
+    /// A card: filled panel, hairline border, card radius, card padding.
+    pub fn raised(p: &Palette) -> eframe::egui::Frame {
+        eframe::egui::Frame::default()
+            .fill(p.panel)
+            .stroke(eframe::egui::Stroke::new(HAIRLINE, p.border))
+            .rounding(radius::CARD)
+            .inner_margin(eframe::egui::Margin::symmetric(space::LG, space::LG))
+    }
+
+    /// A surface on the page: filled panel, no border, control radius.
+    pub fn flat(p: &Palette) -> eframe::egui::Frame {
+        eframe::egui::Frame::default()
+            .fill(p.panel)
+            .rounding(radius::CONTROL)
+            .inner_margin(eframe::egui::Margin::symmetric(space::MD, space::SM))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -179,6 +244,46 @@ impl UiState {
         if let Ok(t) = toml::to_string_pretty(self) {
             let _ = std::fs::write(&p, t);
         }
+    }
+}
+
+/// A 12-column grid with a 16 px gutter.
+///
+/// Cards snap to 3/4/6/8/12 columns and no card is ever narrower than 3. The
+/// helper exists so page files say `grid::span(ui, 6, |ui| ...)` instead of
+/// hand-dividing `available_width()`, which is how two cards end up 1 px apart
+/// and neither aligns with the header.
+pub struct Grid {
+    pub columns: usize,
+    pub gutter: f32,
+}
+
+impl Grid {
+    pub const DEFAULT: Grid = Grid {
+        columns: 12,
+        gutter: space::LG,
+    };
+
+    /// Width of one column, given the available width.
+    pub fn column_w(&self, available: f32) -> f32 {
+        let gaps = self.gutter * (self.columns.saturating_sub(1)) as f32;
+        ((available - gaps) / self.columns as f32).max(0.0)
+    }
+
+    /// Width of a `span`-column card, including its internal gutters.
+    pub fn span_w(&self, available: f32, span: usize) -> f32 {
+        let span = span.clamp(1, self.columns);
+        self.column_w(available) * span as f32 + self.gutter * (span - 1) as f32
+    }
+
+    /// Snap a requested span to a legal one. Legal spans are 3, 4, 6, 8, 12.
+    pub fn legal_span(requested: usize) -> usize {
+        const LEGAL: [usize; 5] = [3, 4, 6, 8, 12];
+        LEGAL
+            .iter()
+            .copied()
+            .find(|s| *s >= requested)
+            .unwrap_or(12)
     }
 }
 
@@ -528,6 +633,139 @@ mod tests {
             assert!(!p.title().is_empty());
             assert!(!p.subtitle().is_empty());
             let _ = p.glyph();
+        }
+    }
+
+    /// The spacing scale has to stay a scale. If someone adds 10.0 because it
+    /// "looked better", every gap in the app stops relating to every other gap.
+    #[test]
+    fn spacing_scale_is_the_documented_set() {
+        let steps = [
+            space::XS,
+            space::SM,
+            space::MD,
+            space::LG,
+            space::XL,
+            space::XXL,
+        ];
+        assert_eq!(steps, [4.0, 8.0, 12.0, 16.0, 24.0, 32.0]);
+        // Strictly increasing, so "next step up" is always meaningful.
+        assert!(steps.windows(2).all(|w| w[1] > w[0]));
+    }
+
+    /// Three radii, three jobs. A fourth is how "rounded" stops meaning anything.
+    #[test]
+    fn radius_scale_has_three_values() {
+        assert_eq!(radius::CONTROL, 6.0);
+        assert_eq!(radius::CARD, 10.0);
+        assert_eq!(radius::PILL, 999.0);
+        // The ordering is a compile-time invariant, so state it as one.
+        const _: () = assert!(radius::CONTROL < radius::CARD);
+    }
+
+    /// Elevation is two levels and neither is a shadow: a hairline does the work.
+    /// A raised card carries exactly one border; a flat surface carries none.
+    #[test]
+    fn elevation_is_two_levels_of_hairline() {
+        let p = Palette::of(Theme::Dark);
+        let raised = elevation::raised(&p);
+        let flat = elevation::flat(&p);
+
+        assert_eq!(raised.stroke.width, HAIRLINE, "a 2 px border is a different design");
+        assert_eq!(raised.stroke.color, p.border, "the raised border is the border token");
+        assert_eq!(raised.rounding.nw, radius::CARD);
+        assert_eq!(flat.stroke.width, 0.0, "a flat surface has no border");
+        assert_eq!(flat.rounding.nw, radius::CONTROL);
+        assert_eq!(HAIRLINE, 1.0);
+        // Both are filled panels, so elevation is a border difference only.
+        assert_eq!(raised.fill, p.panel);
+        assert_eq!(flat.fill, p.panel);
+    }
+
+    /// The type scale is the documented five steps plus the page title.
+    #[test]
+    fn type_scale_is_the_documented_set() {
+        let scale = [LABEL, BODY, VALUE, TITLE, HERO, DISPLAY];
+        assert_eq!(scale, [11.0, 13.5, 19.0, 24.0, 32.0, 40.0]);
+        assert!(scale.windows(2).all(|w| w[1] > w[0]), "the scale must be ordered");
+    }
+
+    /// Grid spans snap to 3/4/6/8/12, and nothing is narrower than 3.
+    #[test]
+    fn grid_snaps_to_legal_spans() {
+        for (requested, expected) in [(1, 3), (2, 3), (3, 3), (4, 4), (5, 6), (6, 6), (7, 8), (8, 8), (9, 12), (12, 12), (99, 12)] {
+            assert_eq!(Grid::legal_span(requested), expected, "span {requested}");
+        }
+    }
+
+    /// A full row of cards must add up to the available width, or cards stop
+    /// aligning with the page header. Note `span_w` returns the *content* width
+    /// of the span, so tiling adds the gutters between cards explicitly.
+    #[test]
+    fn grid_spans_tile_the_row_exactly() {
+        let g = Grid::DEFAULT;
+        let available = 1200.0;
+        // Three 4-column cards plus the two gutters between them fill the row.
+        let three = g.span_w(available, 4) * 3.0 + g.gutter * 2.0;
+        assert!((three - available).abs() < 0.5, "row is {three}, expected {available}");
+        // Two 6-column cards plus one gutter fill the row.
+        let two = g.span_w(available, 6) * 2.0 + g.gutter;
+        assert!((two - available).abs() < 0.5, "row is {two}, expected {available}");
+        // A single 12-column card is the whole width, no gutter.
+        assert!((g.span_w(available, 12) - available).abs() < 0.5);
+        // A wider span is always wider than a narrower one.
+        assert!(g.span_w(available, 8) > g.span_w(available, 6));
+        assert!(g.span_w(available, 6) > g.span_w(available, 4));
+        assert!(g.span_w(available, 4) > g.span_w(available, 3));
+    }
+
+    /// Anti-slop rule: no colour literal outside this file.
+    ///
+    /// This is the verifier's rule from the design brief, enforced where it can
+    /// actually stop a regression. It scans the crate's own sources, so adding
+    /// `Color32::from_rgb(...)` to a page fails the build instead of quietly
+    /// creating a twelfth grey.
+    #[test]
+    fn no_colour_literals_outside_theme() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        collect_offenders(&src, &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "colour literals outside theme.rs: {offenders:#?}"
+        );
+    }
+
+    /// Walk the crate sources for hardcoded colours, skipping this file.
+    ///
+    /// Only *literal* construction counts. Reading a colour out of firmware data
+    /// (`Color32::from_rgb(cur[0], cur[1], cur[2])`) is not a design decision, so
+    /// those lines are allowed by name.
+    fn collect_offenders(dir: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                collect_offenders(&path, out);
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            if path.file_name().and_then(|s| s.to_str()) == Some("theme.rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            for (i, line) in text.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                if code.contains("Color32::from_rgb(") || code.contains("Color32::from_rgba") {
+                    // Firmware-derived colour, not a design token.
+                    if code.contains("cur[0]") || code.contains("cur[1]") {
+                        continue;
+                    }
+                    out.push(format!("{}:{}: {}", path.display(), i + 1, code.trim()));
+                }
+            }
         }
     }
 }

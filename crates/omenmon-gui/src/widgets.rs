@@ -7,7 +7,7 @@
 
 use eframe::egui::{self, Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
 
-use crate::theme::{self, Palette, BODY, LABEL, VALUE};
+use crate::theme::{self, elevation, radius, space, Palette, BODY, HAIRLINE, LABEL, VALUE};
 
 /// Everything a gauge needs to draw itself.
 ///
@@ -30,7 +30,7 @@ pub struct Gauge<'a> {
 /// The arc starts at 7 o'clock and sweeps 270 degrees, which is the shape people
 /// read as "dial" rather than "pie". The unfilled track is always drawn so the
 /// gauge has a scale even at zero.
-pub fn gauge(ui: &mut Ui, g: &Gauge<'_>) -> Response {
+pub fn gauge(ui: &mut Ui, p: &Palette, g: &Gauge<'_>) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(g.diameter), Sense::hover());
     if !ui.is_rect_visible(rect) {
         return resp;
@@ -43,11 +43,12 @@ pub fn gauge(ui: &mut Ui, g: &Gauge<'_>) -> Response {
     let start = 135.0_f32.to_radians();
     let sweep = 270.0_f32.to_radians();
 
-    // Track.
+    // Track. A tint of the text colour, so the empty part of the dial follows the
+    // theme instead of being a hardcoded white that vanishes on the light one.
     painter.add(egui::Shape::circle_stroke(
         c,
         r,
-        Stroke::new(width, Color32::from_rgba_unmultiplied(255, 255, 255, 22)),
+        Stroke::new(width, p.tint(p.text, 22)),
     ));
     // Arc. A full circle is a special case: `line` with identical endpoints
     // tessellates to nothing, so draw a stroke instead.
@@ -71,7 +72,7 @@ pub fn gauge(ui: &mut Ui, g: &Gauge<'_>) -> Response {
     let val_font = egui::FontId::new(g.diameter * 0.235, theme::numeric());
     let unit_font = egui::FontId::new(g.diameter * 0.085, theme::proportional());
     let cap_font = egui::FontId::new(LABEL, theme::proportional());
-    let dim = Color32::from_rgb(0x9A, 0xA0, 0xAC);
+    let dim = p.dim;
 
     let val_galley = ui.fonts(|f| f.layout_no_wrap(g.centre.to_owned(), val_font, g.colour));
     let unit_galley = ui.fonts(|f| f.layout_no_wrap(g.unit.to_owned(), unit_font, dim));
@@ -123,24 +124,24 @@ pub fn meter(ui: &mut Ui, p: &Palette, label: &str, value_text: &str, fraction: 
 }
 
 /// A card with a title row and an optional right-aligned action area.
+///
+/// One raised surface, one hairline border, one padding step. Cards are never
+/// nested: a card inside a card is on the anti-slop list because it makes the
+/// two elevations indistinguishable.
 pub fn card(ui: &mut Ui, p: &Palette, title: &str, body: impl FnOnce(&mut Ui)) {
-    egui::Frame::default()
-        .fill(p.panel)
-        .stroke(Stroke::new(1.0_f32, p.border))
-        .rounding(10.0)
-        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(title)
-                        .size(LABEL)
-                        .color(p.dim)
-                        .family(theme::proportional()),
-                );
-            });
-            ui.add_space(10.0);
-            body(ui);
-        });
+    elevation::raised(p).show(ui, |ui| {
+        ui.label(card_title(p, title));
+        ui.add_space(space::SM);
+        body(ui);
+    });
+}
+
+/// The card heading: uppercase, tracked, secondary colour.
+fn card_title(p: &Palette, title: &str) -> egui::RichText {
+    egui::RichText::new(title.to_uppercase())
+        .size(LABEL)
+        .color(p.dim)
+        .family(theme::proportional())
 }
 
 /// A card whose title row has a right-aligned badge.
@@ -151,31 +152,24 @@ pub fn card_badge(
     badge: Option<(&str, Color32)>,
     body: impl FnOnce(&mut Ui),
 ) {
-    egui::Frame::default()
-        .fill(p.panel)
-        .stroke(Stroke::new(1.0_f32, p.border))
-        .rounding(10.0)
-        .inner_margin(egui::Margin::symmetric(16.0, 14.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(title)
-                        .size(LABEL)
-                        .color(p.dim)
-                        .family(theme::proportional()),
-                );
-                if let Some((text, colour)) = badge {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        badge_pill(ui, p, text, colour);
-                    });
-                }
-            });
-            ui.add_space(10.0);
-            body(ui);
+    elevation::raised(p).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(card_title(p, title));
+            if let Some((text, colour)) = badge {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    badge_pill(ui, p, text, colour);
+                });
+            }
         });
+        ui.add_space(space::SM);
+        body(ui);
+    });
 }
 
 /// A small rounded status pill: glyph + text on a tinted background.
+///
+/// Fully round, because a pill and a control must not share a corner radius:
+/// the radius is what says "this is a label, not a button".
 pub fn badge_pill(ui: &mut Ui, p: &Palette, text: &str, colour: Color32) {
     let galley = ui.fonts(|f| {
         f.layout_no_wrap(
@@ -184,16 +178,20 @@ pub fn badge_pill(ui: &mut Ui, p: &Palette, text: &str, colour: Color32) {
             colour,
         )
     });
-    let pad = Vec2::new(8.0, 3.0);
+    let pad = Vec2::new(space::SM, space::XS * 0.75);
     let size = galley.size() + pad * 2.0;
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect_filled(rect, size.y * 0.5, p.tint(colour, 34));
+    ui.painter().rect_filled(rect, radius::PILL, p.tint(colour, 34));
     ui.painter()
         .galley(rect.min + pad, galley, colour);
 }
 
 /// One labelled statistic: caption above, value below. The workhorse for the
 /// dense rows of numbers OGH shows in a horizontal strip.
+///
+/// Every value is rendered in the numeric family so digits do not jitter as a
+/// 1 Hz sample lands, and every caption is uppercase so it reads as a label
+/// rather than as a sentence that got cut off.
 pub fn stat(ui: &mut Ui, p: &Palette, caption: &str, value: &str, colour: Color32) {
     ui.vertical(|ui| {
         ui.label(
@@ -202,7 +200,7 @@ pub fn stat(ui: &mut Ui, p: &Palette, caption: &str, value: &str, colour: Color3
                 .color(p.dim)
                 .family(theme::proportional()),
         );
-        ui.add_space(2.0);
+        ui.add_space(space::XS * 0.5);
         ui.label(
             egui::RichText::new(value)
                 .size(VALUE)
@@ -221,7 +219,7 @@ pub fn primary_button(ui: &mut Ui, p: &Palette, text: &str, enabled: bool) -> Re
             .family(theme::proportional()),
     )
     .fill(if enabled { p.accent } else { p.raised })
-    .rounding(6.0)
+    .rounding(radius::CONTROL)
     .min_size(Vec2::new(0.0, 30.0));
     ui.add_enabled(enabled, btn)
 }
@@ -235,8 +233,8 @@ pub fn quiet_button(ui: &mut Ui, p: &Palette, text: &str, enabled: bool) -> Resp
             .family(theme::proportional()),
     )
     .fill(p.raised)
-    .stroke(Stroke::new(1.0_f32, p.border))
-    .rounding(6.0)
+    .stroke(Stroke::new(HAIRLINE, p.border))
+    .rounding(radius::CONTROL)
     .min_size(Vec2::new(0.0, 30.0));
     ui.add_enabled(enabled, btn)
 }
@@ -248,7 +246,7 @@ pub fn quiet_button(ui: &mut Ui, p: &Palette, text: &str, enabled: bool) -> Resp
 pub fn segmented(ui: &mut Ui, p: &Palette, options: &[(&str, bool)], enabled: bool) -> Option<usize> {
     let mut clicked = None;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = space::XS;
         for (i, (label, active)) in options.iter().enumerate() {
             let text = egui::RichText::new(*label)
                 .size(BODY)
@@ -256,8 +254,8 @@ pub fn segmented(ui: &mut Ui, p: &Palette, options: &[(&str, bool)], enabled: bo
                 .family(theme::proportional());
             let btn = egui::Button::new(text)
                 .fill(if *active { p.accent } else { p.raised })
-                .stroke(Stroke::new(1.0_f32, if *active { p.accent } else { p.border }))
-                .rounding(6.0)
+                .stroke(Stroke::new(HAIRLINE, if *active { p.accent } else { p.border }))
+                .rounding(radius::CONTROL)
                 .min_size(Vec2::new(0.0, 30.0));
             if ui.add_enabled(enabled, btn).clicked() && !*active {
                 clicked = Some(i);
@@ -269,10 +267,10 @@ pub fn segmented(ui: &mut Ui, p: &Palette, options: &[(&str, bool)], enabled: bo
 
 /// A thin horizontal rule that reads as a section divider.
 pub fn divider(ui: &mut Ui, p: &Palette) {
-    ui.add_space(4.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+    ui.add_space(space::SM);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), HAIRLINE), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, p.border);
-    ui.add_space(4.0);
+    ui.add_space(space::SM);
 }
 
 /// Why a card is empty and what to do about it. Never just "unavailable".
@@ -282,7 +280,7 @@ pub fn empty(ui: &mut Ui, p: &Palette, reason: &str, hint: Option<&str>) {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
         ui.painter()
             .circle_stroke(rect.center(), 3.5, Stroke::new(1.2_f32, p.faint()));
-        ui.add_space(2.0);
+        ui.add_space(space::XS * 0.5);
         ui.label(
             egui::RichText::new(reason)
                 .size(BODY)
