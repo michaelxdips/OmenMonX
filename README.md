@@ -1,94 +1,130 @@
 # OmenMon-rs
 
-Native Rust replacement for HP OMEN Gaming Hub — built for the HP Victus 16
-(board 8C9C) and compatible in principle with other HP laptops exposing the
-`hpqBIntM` WMI BIOS interface.
+A native Rust replacement for HP OMEN Gaming Hub — for the HP Victus 16
+(board 8C9C), and in principle for other HP laptops exposing the `hpqBIntM`
+WMI BIOS interface. A 7 MB portable GUI and a 1.4 MB CLI. No telemetry, no
+accounts, no spinners: it talks to your firmware and shows you the answer.
 
-**Status: v0.3.0 — working fan control.** Telemetry, fan speed control, power cap,
-thermal profiles, keyboard RGB, BIOS settings and a self-installer. Everything in
-the table below was measured on the reference machine; nothing is aspirational.
+**Status: v0.3.1.** Everything in the feature table below was measured on the
+reference machine with real workloads — nothing is aspirational. What the
+firmware refuses is documented too, with the evidence.
 
-## Features
+![crates](https://img.shields.io/badge/crates-5-blue) ![tests](https://img.shields.io/badge/tests-97%20passing-brightgreen) ![platform](https://img.shields.io/badge/Windows-10%2B-blueviolet) ![license](https://img.shields.io/badge/license-GPL--3.0-orange)
 
-| Area | What you get |
+## What you get
+
+| Area | What it does |
 |------|--------------|
-| Temps | CPU / GPU / GPU-hotspot via direct EC (PawnIO) with WMI fallback |
-| **Fans** | **Max mode, manual speed, and hand-back-to-firmware — all verified** |
-| Power | CPU power cap 5–65 W on the 230 W brick, 5–25 W on USB-C |
-| Thermal | Balanced / Performance / Cool, read back from the firmware |
-| Keyboard | Per-zone RGB with byte-exact restore |
-| BIOS | Read and write BIOS settings through the WMI instance path |
-| Battery | Health %, wear grade, charge rate, cycles, temperature — richer than OGH |
-| Config | TOML profiles; saved cap and profile re-applied at logon |
-| Install | Single-exe self-installer: Program Files copy, PATH, autostart, ARP entry |
+| **GUI** | Four-page console — Overview (live temps, fan curve plot, battery), Control (power cap, thermal, fans), Lighting (keyboard RGB), System (battery health, BIOS, updates, build info). Dark single-accent design, keyboard-navigable, works from 940 px window width. |
+| **CLI** | One-shot `status`, temperature sensors, fan control, power cap, thermal profiles, RGB zones, BIOS read/write, battery health, hardware probe. |
+| **Fans** | Max mode, manual percentage hold, and a verified hand-back-to-firmware. The release path sends HP's own `EWMA_ALGO` scheme — see [Fan control](#fan-control) for why that matters. |
+| **Power** | CPU power cap 5–65 W on the 230 W brick, 5–25 W on USB-C. The ceiling is read from the firmware, never hardcoded. Every write is readback-verified; only the *verified* outcome is persisted. |
+| **Thermal** | Balanced / Performance / Cool, written and read back from the firmware. |
+| **Keyboard** | Per-zone RGB with byte-exact read-modify-write — a failed write restores the original table. |
+| **BIOS** | Read and write BIOS settings through the WMI instance path (class-level calls fail with rc 5; this project got that right). |
+| **Battery** | Health %, wear grade, charge rate, cycle count, temperature — more than OGH shows. |
+| **Safety** | Saved cap and thermal profile re-applied at logon only after verification. Interrupted operations leave a recovery marker, not a broken state. Crash reports survive the crash that writes them. |
+| **Self-updating** | Checks GitHub Releases, verifies a SHA-256 digest *before* renaming anything, and stages a per-asset install plan. Pre-release tags are never offered as stable updates. |
 
 ## Install
 
-1. Install [PawnIO](https://pawnio.eu) (signed kernel driver, required for EC access).
-2. Download `omenmon-setup.exe` from Releases and run it as administrator.
-3. `omenmon status` — done.
+1. Install [PawnIO](https://pawnio.eu) — the signed kernel driver needed for
+   direct EC access.
+2. Download `omenmon-setup.exe` from
+   [Releases](https://github.com/michaelxdips/OmenMonX/releases/latest) and run
+   it as administrator. It copies the binaries to `C:\Program Files\OmenMon`,
+   adds the folder to your user PATH, registers a logon task that re-applies
+   your saved settings, and adds an Add/Remove Programs entry.
 
-**Portable, no install:** download `OmenMonX-portable.zip` from Releases, unzip
-anywhere, run `omenmon-gui.exe` or `omenmon.exe` from the folder. Verify the
-archive against the `SHA256SUMS.txt` inside the zip. A portable copy does not
-touch PATH, autostart or the registry.
+**Portable, no install:** download `OmenMonX-portable.zip`, unzip anywhere, run
+`omenmon-gui.exe` or `omenmon.exe` from the folder. Nothing touches PATH,
+autostart or the registry. The zip contains its own `SHA256SUMS.txt`; the
+release page also publishes the digest of the zip itself.
 
-## Commands
+**Upgrading:** the GUI checks GitHub Releases on launch and offers the update;
+the digest is verified before anything is replaced. Or just overwrite with the
+portable zip.
+
+## CLI
 
 ```
 omenmon status     one-shot dashboard (temps + fan + battery)
 omenmon temps      temperature sensors
-omenmon fans       fan count/type/level
+omenmon fans       fan count and per-fan level
 omenmon fan max    spin the fans to maximum
 omenmon fan auto   hand the fans back to the firmware
 omenmon fan 45     hold a manual 45 % fan speed
-omenmon cap 45     set the CPU power cap (5-65 W on the brick)
+omenmon cap 45     set the CPU power cap (supply-aware, readback-checked)
 omenmon thermal performance|cool|balanced
-omenmon kbd 0 FF0000        set one keyboard zone
-omenmon bios list|get|set   BIOS settings
+omenmon kbd 0 --color FF8800   set one keyboard zone
+omenmon bios list|get|set      BIOS settings
 omenmon battery    health, wear, charge rate, cycles, temperature
 omenmon probe      hardware capability matrix
-omenmon apply      re-apply the saved cap and profile (used by the logon task)
+omenmon apply      re-apply the saved cap and profile (logon task)
+omenmon restore-defaults   clear saved settings, firmware re-applies its own
 ```
 
-Run elevated for anything that writes firmware. `status` and `battery` work
-unelevated for the parts that do not need a token.
+Writes need an elevated terminal. `status` and `battery` work unelevated for
+the parts that do not need a token — the output says which parts degraded and
+why. Usage errors are reported *before* elevation is attempted, so a typo does
+not come back disguised as a permissions problem.
 
 ## Fan control
 
-Fan speed control works on this board. The write is `0x2E`, whose first byte is
-HP's own `FanSetScheme` enum:
+Fan speed control works on this board. The write channel is `0x2E`, whose
+first byte is HP's own `FanSetScheme` enum (read from `PerformanceControl.dll`
+by reflection, values confirmed):
 
 | Scheme | Value | Effect (measured) |
 |--------|-------|-------------------|
-| `EWMA_ALGO` | 0 | Firmware's own algorithm. Level dips to 0 then ramps back — this is *handing control back*. |
+| `EWMA_ALGO` | 0 | The firmware's own algorithm. Level dips to 0 and ramps back — this is *handing control back*. |
 | `SLIDER` | 1 | Holds the commanded percentage in bytes 1–3. Manual control. |
 | `IDLE_AUTO` | 2 | Quiet, load-independent. |
 
-`0x27 {1,0,0,0}` is the Max mode OGH exposes. **Turning it off does not release
-the fans** — the level stays pinned at maximum. The release is `0x2E` with
-`EWMA_ALGO`, which is why `omenmon fan auto` sends that rather than a low slider
-value. A low slider value looks like a release but is a manual hold: measured
-from max, it fell 59 → 34 and then latched at 39, never dipping.
+`0x27 {1,0,0,0}` is Max mode. **Turning it off does not release the fans** —
+the level stays pinned at maximum until a `0x2E` write arrives. That is why
+`omenmon fan auto` sends `EWMA_ALGO`, not a low slider value: measured from
+max, a low slider write fell 59 → 34 and then *latched* at 39, holding the
+fans at a manual speed while looking like a release.
 
-An earlier release of this README claimed manual fan control "awaits a signed
-kernel module". That was wrong: it was based on a probe that sent the fan table's
-dB index where the firmware reads a scheme and a speed. The write channel was
-open the whole time.
+An earlier version of this README claimed manual fan control "awaits a signed
+kernel module". That was wrong — the probe behind it sent the fan table's dB
+index where the firmware reads a scheme byte. The write channel was open the
+whole time. Check the vendor's own call site before declaring a channel dead.
 
 ## What does not work
 
-These are firmware-refused on 8C9C, verified rather than assumed:
+Refused by the firmware on 8C9C — verified, not assumed:
 
 | Feature | Why |
 |---------|-----|
 | Fan **curve** writing (`0x32`) | Rejected. Speed control and curve writing are different commands — do not conflate them. |
-| Battery charge limit | `Battery Care Function` returns rc 5 for all 27 encodings. |
-| GPU mode switch | `0x52` returns BIOS err 5. |
-| BIOS undervolt / OC | `0x35` returns WMI err 31. |
+| Battery charge limit | `Battery Care Function` returns rc 5 for all 27 encodings tried. |
+| GPU mode switch (`0x52`) | BIOS error 5. |
+| BIOS undervolt / OC (`0x35`) | WMI error 31. |
 
-The EC tachometer at `0xC4` reads a frozen 1249 rpm on this board, so it is never
-displayed as a live RPM. Fan level (`0x2D`) is the live readout.
+The EC tachometer at `0xC4` reads a frozen 1249 rpm on this board, so it is
+never displayed as live RPM — live fan level comes from `0x2D`. The EC mutex
+(`Global\Access_EC`) serializes cooperating userland peers and every
+transaction drains the status buffer first; it does not serialize WMI-side
+firmware writes, and the code is honest about that.
+
+## Architecture
+
+Five crates:
+
+| Crate | Role |
+|-------|------|
+| `hp-ec` | Direct EC access via PawnIO: port I/O, mutex discipline, bus resync |
+| `hp-wmi` | The `hpqBIntM` WMI transport: payloads, instance-path calls, COM lifetime |
+| `hp-core` | Config (atomic TOML with `.bak`), fan curves, battery, the engine |
+| `omenmon-cli` | The CLI, the daemon (single-instance, atomic lockfile), the installer |
+| `omenmon-gui` | The egui console, sampler, tray, updater, crash reporting |
+
+CI enforces on every push: full test suite, clippy with warnings denied, and a
+probe-leak gate proving a plain release build contains exactly the four shipped
+binaries. Releases are tag-triggered and publish the four exes plus the
+portable zip with SHA-256 checksums.
 
 ## Building
 
@@ -96,11 +132,9 @@ displayed as a live RPM. Fan level (`0x2D`) is the live readout.
 cargo build --release
 ```
 
-Binaries land in `target/release/`: `omenmon.exe`, `omenmon-gui.exe`,
+You need the Windows MSVC toolchain; PawnIO is only needed at runtime, not to
+compile. Binaries land in `target/release/`: `omenmon.exe`, `omenmon-gui.exe`,
 `omenmon-setup.exe`, `daemon.exe`.
-
-The reverse-engineering instruments used to derive the protocol are not part of
-this repository; they were development tooling and are not built or shipped.
 
 ## License
 
