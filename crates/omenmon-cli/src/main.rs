@@ -29,12 +29,18 @@ enum Command {
     Status,
     /// CPU power limits (0x2A block) and the writable window
     Power,
-    /// Set the CPU power cap in watts (supply-aware: 5-65 W on the brick,
-    /// 5-25 W on USB-C; readback-checked)
+    /// Set the CPU power cap in watts (supply-aware: 5-50 W verified on the
+    /// brick, 65 W verified; 5-25 W on USB-C; readback-checked)
     Cap {
         /// Watts to apply. The ceiling follows the power supply: 65 on the
         /// 230 W brick, 25 on USB-C PD. Out-of-range values are clamped by the
         /// firmware and reported, never silently accepted.
+        ///
+        /// Verified accepted on the brick: 65, 50, 40, 30, 25, 20 W (under
+        /// load, readback-checked). The 51-64 W band has NOT been swept yet:
+        /// a request there is sent as-is and verified by readback, but it is
+        /// unverified territory, not a documented refusal. Values the
+        /// firmware rejects read back differently and are reported as such.
         watts: u8,
     },
     /// Show the firmware fan curve (42 points, read-only)
@@ -293,6 +299,15 @@ fn power_cap(watts: u8) -> anyhow::Result<()> {
             "requested {watts} W -> clamped to {applied} W (this supply accepts {}..{} W)",
             CpuPowerLimits::MIN_WATTS,
             ceiling
+        );
+    }
+    // Honesty marker: the sub-50 and 65 W points are verified under load; the
+    // 51-64 W band has never been swept. Say so rather than implying every
+    // value up to the ceiling carries the same evidence.
+    if (51..=64).contains(&applied) {
+        println!(
+            "note: {applied} W is in the 51-64 W band that has not been swept on \
+             this board; the readback below is the only verification for it"
         );
     }
     // Verify by readback: the firmware is the authority, not our request.
