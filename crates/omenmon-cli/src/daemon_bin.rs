@@ -3,7 +3,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-fn log_dir() -> std::path::PathBuf {
+/// Log/data directory for the daemon (lock file, log). PUB(crate)-visible so
+/// the lib.rs unit tests can exercise the instance guard directly.
+pub(crate) fn log_dir() -> std::path::PathBuf {
     std::env::var("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
@@ -18,9 +20,9 @@ fn ts() -> String {
     format!("[{n}]")
 }
 
-/// Simple single-instance guard using the `single_instance_guard`-style
-/// approach without extra deps: lock file with PID + stale detection.
-struct InstanceGuard {
+/// Simple single-instance guard: lock file with PID + stale detection.
+/// PUB(crate)-visible so the lib.rs unit tests can exercise it directly.
+pub(crate) struct InstanceGuard {
     path: std::path::PathBuf,
 }
 
@@ -42,7 +44,8 @@ impl InstanceGuard {
             .unwrap_or(false)
     }
 
-    fn acquire() -> anyhow::Result<Self> {
+    /// PUB(crate): the lib.rs unit tests exercise the guard directly.
+    pub(crate) fn acquire() -> anyhow::Result<Self> {
         let path = log_dir().join("daemon.lock");
         // Atomic creation first: two daemons starting together must not both
         // win. Only when the lock already exists do we run the stale-pid check.
