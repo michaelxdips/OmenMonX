@@ -15,7 +15,27 @@ fn main() -> anyhow::Result<()> {
     match action.as_str() {
         "install" => install()?,
         "uninstall" => uninstall()?,
-        other => bail!("usage: omenmon-setup [install|uninstall] (got: {other})"),
+        // `--help` and `-h` are what a user types first. Answering them with an
+        // error and exit code 1 reads as a broken program, so print the usage and
+        // exit 0.
+        "help" | "--help" | "-h" => {
+            println!("omenmon-setup {}", env!("CARGO_PKG_VERSION"));
+            println!();
+            println!("Installs OmenMon to C:\\Program Files\\OmenMon:");
+            println!("  - copies omenmon.exe, omenmon-gui.exe, omenmon-setup.exe");
+            println!("  - adds the install dir to the user PATH");
+            println!("  - registers an elevated logon task that runs `omenmon apply`");
+            println!("  - adds an Add/Remove Programs entry");
+            println!();
+            println!("Usage: omenmon-setup [install|uninstall]");
+            println!();
+            println!("  install    (default) install or repair");
+            println!("  uninstall  remove files, PATH entry and logon task");
+            println!();
+            println!("Both actions need administrator rights.");
+            return Ok(());
+        }
+        other => anyhow::bail!("usage: omenmon-setup [install|uninstall] (got: {other})"),
     }
     Ok(())
 }
@@ -138,18 +158,56 @@ fn install() -> anyhow::Result<()> {
 fn uninstall() -> anyhow::Result<()> {
     println!("OmenMon-rs uninstaller");
     println!("{}", "=".repeat(50));
+
+    // Check elevation up front. Without this, the first `schtasks /Delete` failed
+    // with "cmd failed: schtasks ... ERROR: Access is denied" and the user had to
+    // work out for themselves that the real problem was a missing admin token.
+    if !is_elevated() {
+        anyhow::bail!(
+            "administrator rights required.\n\
+             Right-click omenmon-setup.exe -> \"Run as administrator\", or run\n\
+             `omenmon-setup uninstall` from an elevated terminal."
+        );
+    }
+
     run(&format!("schtasks /Delete /F /TN {TASK_NAME}"))?;
     let _ = Command::new("schtasks").args(["/Delete", "/F", "/TN", "OmenMonRunner"]).output();
     run("reg delete HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OmenMon-rs /f")?;
-    // remove binaries (best effort)
-    for name in ["omenmon.exe", "omenmon-setup.exe", "status.log"] {
+
+    // Remove every binary the installer put there. The list previously omitted
+    // omenmon-gui.exe, so uninstall left the largest file behind and the install
+    // directory could never be removed - a reinstall then inherited a stale GUI.
+    for name in ["omenmon.exe", "omenmon-gui.exe", "omenmon-setup.exe", "status.log"] {
         let p = PathBuf::from(INSTALL_DIR).join(name);
         if p.exists() {
-            let _ = std::fs::remove_file(&p);
+            if let Err(e) = std::fs::remove_file(&p) {
+                // A running instance is the usual cause; say so instead of
+                // pretending the file is gone.
+                println!("could not remove {name}: {e} (close OmenMon and retry)");
+            }
         }
     }
-    let _ = std::fs::remove_dir(INSTALL_DIR);
-    println!("removed. (PATH entry left; harmless)");
+
+    // The Startup shortcut the installer created.
+    if let Some(dir) = std::env::var("APPDATA")
+        .ok()
+        .map(|a| PathBuf::from(a).join("Microsoft\\Windows\\Start Menu\\Programs\\Startup"))
+    {
+        let lnk = dir.join("OmenMon.lnk");
+        if lnk.exists() {
+            let _ = std::fs::remove_file(&lnk);
+            println!("removed startup shortcut");
+        }
+    }
+
+    match std::fs::remove_dir(INSTALL_DIR) {
+        Ok(()) => println!("removed {INSTALL_DIR}"),
+        // Not empty means something is still running or a foreign file was put
+        // there; leaving it is correct, but say why.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => println!("kept {INSTALL_DIR}: {e}"),
+    }
+    println!("done. (PATH entry left; harmless)");
     Ok(())
 }
 

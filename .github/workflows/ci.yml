@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release
-          $shipped = @('omenmon.exe','omenmon-gui.exe','omenmon-setup.exe','watch.exe','daemon.exe')
+          $shipped = @('omenmon.exe','omenmon-gui.exe','omenmon-setup.exe','daemon.exe')
           $built = Get-ChildItem target/release -Filter *.exe | Select-Object -ExpandProperty Name
           $leaked = $built | Where-Object { $shipped -notcontains $_ }
           if ($leaked) {

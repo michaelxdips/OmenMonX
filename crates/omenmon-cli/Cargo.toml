@@ -26,10 +26,6 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 
 [[bin]]
-name = "watch"
-path = "src/bin/watch.rs"
-
-[[bin]]
 name = "omenmon-setup"
 path = "src/bin/setup.rs"
 

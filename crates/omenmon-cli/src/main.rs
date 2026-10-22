@@ -10,7 +10,7 @@ mod daemon {
 }
 
 #[derive(Parser)]
-#[command(name = "omenmon", version, about = "Victus/Omen hardware control — Rust edition")]
+#[command(name = "omenmon", version, about = "Victus/Omen hardware control - Rust edition")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -30,9 +30,12 @@ enum Command {
     Status,
     /// CPU power limits (0x2A block) and the writable window
     Power,
-    /// Set the CPU power cap in watts (verified 5..25 W, readback-checked)
+    /// Set the CPU power cap in watts (supply-aware: 5-65 W on the brick,
+    /// 5-25 W on USB-C; readback-checked)
     Cap {
-        /// Watts to apply, 5..25
+        /// Watts to apply. The ceiling follows the power supply: 65 on the
+        /// 230 W brick, 25 on USB-C PD. Out-of-range values are clamped by the
+        /// firmware and reported, never silently accepted.
         watts: u8,
     },
     /// Show the firmware fan curve (42 points, read-only)
@@ -96,7 +99,7 @@ fn main() -> anyhow::Result<()> {
 
 fn battery() -> anyhow::Result<()> {
     let info = hp_core::battery::read_battery();
-    println!("omenmon battery — HP Victus");
+    println!("omenmon battery  -  HP Victus");
     println!("{}", "=".repeat(50));
     println!(
         "charge:          {:>3} %",
@@ -127,7 +130,7 @@ fn battery() -> anyhow::Result<()> {
             90..=100 => "excellent",
             80..=89 => "good",
             60..=79 => "worn",
-            _ => "degraded — consider replacement",
+            _ => "degraded  -  consider replacement",
         };
         println!("wear grade:      {grade}");
     }
@@ -163,7 +166,7 @@ fn status() -> anyhow::Result<()> {
         None => {
             // degraded: battery-only status
             let b = hp_core::battery::read_battery();
-            println!("omenmon status (degraded — elevated run needed for temps/fans)");
+            println!("omenmon status (degraded  -  elevated run needed for temps/fans)");
             println!("{}", "=".repeat(50));
             println!(
                 "battery: {} %, health {}, {}",
@@ -179,20 +182,29 @@ fn status() -> anyhow::Result<()> {
     println!("{}", "=".repeat(50));
     println!(
         "CPU: {}   GPU: {}   hotspot: {}",
-        s.cpu.unwrap_or(0.0),
-        s.gpu.unwrap_or(0.0),
+        s.cpu.map(console::temp_c).unwrap_or_else(|| "n/a".into()),
+        s.gpu.map(console::temp_c).unwrap_or_else(|| "n/a".into()),
         s.gpu_hotspot
             .map(console::temp_c)
-            .unwrap_or("n/a".into())
+            .unwrap_or_else(|| "n/a".into())
     );
     // The EC tachometer at 0xC4 reads a frozen 1249 rpm on this board, so it is
     // not printed: a constant presented as a measurement is worse than no number.
-    // The level byte is live and is the honest readout.
+    // The level byte (0x2D) is live and is the honest readout.
+    //
+    // `sample.fan_level_pct` is only populated on some paths, so fall back to a
+    // direct 0x2D read rather than printing "n/a" next to a working sensor - the
+    // status line said "fan: level n/a" while `omenmon fan` reported 23/26.
+    let level = s.fan_level_pct.or_else(|| {
+        bios.as_ref()
+            .and_then(|b| b.fan_levels().ok())
+            .map(|(a, _)| a)
+    });
     println!(
         "fan: level {}",
-        s.fan_level_pct
+        level
             .map(|v| format!("{v} %"))
-            .unwrap_or("n/a".into())
+            .unwrap_or_else(|| "n/a".into())
     );
     println!(
         "curve target: {} % (read-only; the curve cannot be written)",
@@ -506,7 +518,7 @@ fn bios_settings(name: Option<&str>, set: Option<&str>) -> anyhow::Result<()> {
 /// Fan speed control.
 ///
 /// `max` is verified working on this board (0x27). `auto` releases max mode, which
-/// needs a 0x2E write as well — 0x27 off alone leaves the fans pinned. A number
+/// needs a 0x2E write as well  -  0x27 off alone leaves the fans pinned. A number
 /// sets a manual duty through 0x2E.
 fn fan(setting: Option<&str>) -> anyhow::Result<()> {
     let b = bios()?;
@@ -643,11 +655,11 @@ fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(300));
             let now = b.get_color_table()?.data;
             if now[o..o + 3] == tbl[o..o + 3] {
-                println!("zone {z} set to {hex} — verified by readback");
+                println!("zone {z} set to {hex}  -  verified by readback");
             } else {
                 println!("readback mismatch; attempting restore");
                 b.set_color_table(&orig)?;
-                anyhow::bail!("write not verified — original restored");
+                anyhow::bail!("write not verified  -  original restored");
             }
         }
         (Some(_), None) => anyhow::bail!("--color <hex> required with a zone"),
@@ -655,13 +667,38 @@ fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Open the BIOS interface, or explain why it is unavailable in terms a user can
+/// act on.
+///
+/// `Bios::connect()` fails with a raw WMI error (`Impersonation failed - Access
+/// denied (0x80041003)`) when the process is not elevated. Printing that verbatim
+/// makes the tool look broken rather than permission-gated, so the common case is
+/// translated. Anything else is passed through unchanged, because a genuine
+/// driver or firmware fault should not be disguised as a permissions problem.
 fn bios() -> anyhow::Result<Bios> {
-    let b = Bios::connect().map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(b)
+    Bios::connect().map_err(|e| {
+        let text = e.to_string();
+        let denied = text.contains("0x80041003")
+            || text.contains("Access denied")
+            || text.contains("Impersonation");
+        if denied {
+            anyhow::anyhow!(
+                "the BIOS interface needs administrator rights.\n\
+                 \n\
+                 Run this command from an elevated terminal (right-click Terminal\n\
+                 or PowerShell -> \"Run as administrator\"), or use\n\
+                 `omenmon status` and `omenmon battery`, which work without elevation.\n\
+                 \n\
+                 underlying error: {text}"
+            )
+        } else {
+            anyhow::anyhow!("{text}")
+        }
+    })
 }
 
 fn probe() -> anyhow::Result<()> {
-    println!("omenmon probe — HP WMI BIOS capability matrix");
+    println!("omenmon probe  -  HP WMI BIOS capability matrix");
     println!("{}", "=".repeat(55));
     let b = bios()?;
 
@@ -688,71 +725,71 @@ fn probe() -> anyhow::Result<()> {
         Err(e) => println!("GetSystem (0x28):         FAIL - {e}"),
     }
     match b.get_fan_count() {
-        Ok(n) => println!("GetFanCount (0x10):       OK — {n} fan(s)"),
-        Err(e) => println!("GetFanCount (0x10):       FAIL — {e}"),
+        Ok(n) => println!("GetFanCount (0x10):       OK  -  {n} fan(s)"),
+        Err(e) => println!("GetFanCount (0x10):       FAIL  -  {e}"),
     }
     match b.get_fan_type() {
         Ok(r) => {
             let t = r.byte0().unwrap_or(0);
-            println!("GetFanType (0x2C):        OK — byte0=0x{t:02X} (nibbles: 1=CPU 2=GPU 3=exhaust 4=pump 5=intake)");
+            println!("GetFanType (0x2C):        OK  -  byte0=0x{t:02X} (nibbles: 1=CPU 2=GPU 3=exhaust 4=pump 5=intake)");
         }
-        Err(e) => println!("GetFanType (0x2C):        FAIL — {e}"),
+        Err(e) => println!("GetFanType (0x2C):        FAIL  -  {e}"),
     }
     match b.get_fan_level() {
         Ok(r) => {
             let hex: Vec<String> = r.data.iter().take(8).map(|b| format!("{b:02X}")).collect();
-            println!("GetFanLevel (0x2D):       OK — [{}]", hex.join(" "));
+            println!("GetFanLevel (0x2D):       OK  -  [{}]", hex.join(" "));
         }
-        Err(e) => println!("GetFanLevel (0x2D):       FAIL — {e}"),
+        Err(e) => println!("GetFanLevel (0x2D):       FAIL  -  {e}"),
     }
     match b.get_max_fan() {
-        Ok(r) => println!("GetMaxFan (0x26):         OK — {}", r.byte0().unwrap_or(0)),
-        Err(e) => println!("GetMaxFan (0x26):         FAIL — {e}"),
+        Ok(r) => println!("GetMaxFan (0x26):         OK  -  {}", r.byte0().unwrap_or(0)),
+        Err(e) => println!("GetMaxFan (0x26):         FAIL  -  {e}"),
     }
     match b.get_gpu_power() {
-        Ok(r) => println!("GetGpuPower (0x21):       OK — bytes {:02X?}", &r.data[..r.data.len().min(4)]),
-        Err(e) => println!("GetGpuPower (0x21):       FAIL — {e}"),
+        Ok(r) => println!("GetGpuPower (0x21):       OK  -  bytes {:02X?}", &r.data[..r.data.len().min(4)]),
+        Err(e) => println!("GetGpuPower (0x21):       FAIL  -  {e}"),
     }
     match b.get_gpu_mode() {
-        Ok(r) => println!("GetGpuMode (0x52):        OK — {}", r.byte0().unwrap_or(0)),
-        Err(e) => println!("GetGpuMode (0x52):        FAIL — {e}"),
+        Ok(r) => println!("GetGpuMode (0x52):        OK  -  {}", r.byte0().unwrap_or(0)),
+        Err(e) => println!("GetGpuMode (0x52):        FAIL  -  {e}"),
     }
     match b.get_fan_table() {
-        Ok(r) => println!("GetFanTable (0x2F):       OK — {} bytes", r.data.len()),
-        Err(e) => println!("GetFanTable (0x2F):       FAIL — {e}"),
+        Ok(r) => println!("GetFanTable (0x2F):       OK  -  {} bytes", r.data.len()),
+        Err(e) => println!("GetFanTable (0x2F):       FAIL  -  {e}"),
     }
     match b.has_backlight() {
-        Ok(v) => println!("HasBacklight (kbd 1):     OK — {v}"),
-        Err(e) => println!("HasBacklight (kbd 1):     FAIL — {e}"),
+        Ok(v) => println!("HasBacklight (kbd 1):     OK  -  {v}"),
+        Err(e) => println!("HasBacklight (kbd 1):     FAIL  -  {e}"),
     }
     match b.get_kbd_type() {
-        Ok(v) => println!("GetKbdType (0x2B):        OK — {v}"),
-        Err(e) => println!("GetKbdType (0x2B):        FAIL — {e}"),
+        Ok(v) => println!("GetKbdType (0x2B):        OK  -  {v}"),
+        Err(e) => println!("GetKbdType (0x2B):        FAIL  -  {e}"),
     }
     match b.get_color_table() {
         Ok(r) => {
             let hex: Vec<String> = r.data.iter().take(16).map(|b| format!("{b:02X}")).collect();
-            println!("GetColorTable (kbd 2):    OK — [{}...]", hex.join(" "));
+            println!("GetColorTable (kbd 2):    OK  -  [{}...]", hex.join(" "));
         }
-        Err(e) => println!("GetColorTable (kbd 2):    FAIL — {e}"),
+        Err(e) => println!("GetColorTable (kbd 2):    FAIL  -  {e}"),
     }
     match b.get_backlight() {
-        Ok(v) => println!("GetBacklight (kbd 4):     OK — 0x{v:02X}"),
-        Err(e) => println!("GetBacklight (kbd 4):     FAIL — {e}"),
+        Ok(v) => println!("GetBacklight (kbd 4):     OK  -  0x{v:02X}"),
+        Err(e) => println!("GetBacklight (kbd 4):     FAIL  -  {e}"),
     }
 
-    // Temperature — brute force sensor selectors
+    // Temperature  -  brute force sensor selectors
     println!("\nGetTemperature (0x23) sensor probe:");
     for sensor in [0u8, 1, 2, 3, 4, 0xFF] {
         match b.get_temperature(sensor) {
             Ok(r) => {
                 if r.is_ok() {
-                    println!("  sensor {sensor:3}: OK — {} (raw {:02X?})", r.byte0().unwrap_or(0), &r.data[..r.data.len().min(4)]);
+                    println!("  sensor {sensor:3}: OK  -  {} (raw {:02X?})", r.byte0().unwrap_or(0), &r.data[..r.data.len().min(4)]);
                 } else {
                     println!("  sensor {sensor:3}: rwret={}", r.return_code);
                 }
             }
-            Err(e) => println!("  sensor {sensor:3}: FAIL — {e}"),
+            Err(e) => println!("  sensor {sensor:3}: FAIL  -  {e}"),
         }
     }
     Ok(())

@@ -37,7 +37,7 @@ jobs:
           # omenmon-cli/src/lib.rs::no_probe_leaks_into_release. An earlier version
           # of this step listed only three, so the leak check rejected the
           # legitimate daemon.exe and watch.exe.
-          $shipped = @('omenmon.exe','omenmon-gui.exe','omenmon-setup.exe','watch.exe','daemon.exe')
+          $shipped = @('omenmon.exe','omenmon-gui.exe','omenmon-setup.exe','daemon.exe')
           New-Item -ItemType Directory -Force dist | Out-Null
           foreach ($name in $shipped) {
             $src = "target/release/$name"

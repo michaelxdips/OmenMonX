@@ -76,7 +76,19 @@ pub fn run() -> anyhow::Result<()> {
         Ok(b) => b,
         Err(e) => {
             log(&format!("FATAL: WMI BIOS connect failed: {e}"));
-            anyhow::bail!("WMI BIOS unavailable");
+            // Same translation as the CLI's `bios()`: a permission problem must
+            // not read as a broken driver, because the fix is different.
+            let text = e.to_string();
+            let denied = text.contains("0x80041003")
+                || text.contains("Access denied")
+                || text.contains("Impersonation");
+            if denied {
+                anyhow::bail!(
+                    "the daemon needs administrator rights to reach the BIOS interface; \
+                     start it from an elevated terminal"
+                );
+            }
+            anyhow::bail!("WMI BIOS unavailable: {e}");
         }
     };
     let io = hp_ec::ecio::EcIo::connect().ok();
