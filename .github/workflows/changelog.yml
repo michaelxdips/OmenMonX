@@ -26,12 +26,24 @@ jobs:
             echo "# Changelog"
             echo
             echo "Generated from tagged releases; each section lists the"
-            echo "commits between the previous tag and this one."
+            echo "commits between the previous tag and this one, grouped"
+            echo "by type (feat / fix / perf / docs / build / probe / other)."
             echo
             for tag in $(git tag --sort=-creatordate); do
               echo "## $tag"
-              git log "$tag^..$tag" --pretty="- %s" 2>/dev/null || \
-                git log "$tag" -1 --pretty="- %s"
+              # Group commits by conventional-commit type. Anything without a
+              # recognized prefix lands in Other so nothing is silently dropped.
+              prev=$(git describe --tags --abbrev=0 "$tag^" 2>/dev/null || echo "")
+              range="$tag"
+              if [ -n "$prev" ]; then range="$prev..$tag"; fi
+              for group in "Features:feat" "Fixes:fix" "Performance:perf" "Documentation:docs" "Build/CI:build" "Probes:probe" "Other:"; do
+                label="${group%%:*}"; prefix="${group#*:}"
+                if [ -z "$prefix" ]; then
+                  git log "$range" '--pretty=format:- %s' | grep -Ev -- "-[[:space:]]*(feat|fix|perf|docs|build|probe)[(:]" || true
+                else
+                  git log "$range" '--pretty=format:- %s' | grep -E -- "-[[:space:]]*${prefix}[(:]" || true
+                fi
+              done
               echo
             done
           } > CHANGELOG.md
