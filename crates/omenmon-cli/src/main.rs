@@ -640,27 +640,23 @@ fn thermal(mode: Option<&str>) -> anyhow::Result<()> {
 }
 
 fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
-    let b = bios()?;
-    match (zone, color) {
-        // --color without a zone is a usage error, not a show request: the user
-        // meant to write, and silently printing the table would look like the
-        // command did nothing.
-        (None, Some(_)) => anyhow::bail!("--color needs a zone: omenmon kbd <0-3> --color <hex>"),
-        (None, None) => {
-            let r = b.get_color_table()?;
-            let d = &r.data;
-            println!("color table ({} bytes), zone colors at 0x1A + 3*i:", d.len());
-            for i in 0..4usize {
-                let o = 0x1A + i * 3;
-                if o + 2 < d.len() {
-                    println!("  zone {i}: {:02X}{:02X}{:02X}", d[o], d[o + 1], d[o + 2]);
-                }
-            }
+    // --color without a zone is a usage error, not a show request: the user
+    // meant to write, and silently printing the table would look like the
+    // command did nothing. Check BEFORE touching the BIOS interface so a
+    // non-elevated user gets the usage error, not an elevation error.
+    if zone.is_none() && color.is_some() {
+        anyhow::bail!("--color needs a zone: omenmon kbd <0-3> --color <hex>");
+    }
+    if let Some(z) = zone {
+        if z > 3 {
+            anyhow::bail!("zone must be 0..3");
         }
-        (Some(z), Some(hex)) => {
-            if z > 3 {
-                anyhow::bail!("zone must be 0..3");
-            }
+    }
+    // Validate the color argument before opening the BIOS interface so a
+    // non-elevated user with a typo gets the real error, not an elevation
+    // error.
+    let color = match color {
+        Some(hex) => {
             let hex = hex
                 .strip_prefix("0x")
                 .or_else(|| hex.strip_prefix("0X"))
@@ -673,6 +669,24 @@ fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
             if c > 0xFFFFFF {
                 anyhow::bail!("color value 0x{c:X} exceeds 24-bit RGB (max 0xFFFFFF)");
             }
+            Some((hex, c))
+        }
+        None => None,
+    };
+    let b = bios()?;
+    match (zone, color) {
+        (None, None) => {
+            let r = b.get_color_table()?;
+            let d = &r.data;
+            println!("color table ({} bytes), zone colors at 0x1A + 3*i:", d.len());
+            for i in 0..4usize {
+                let o = 0x1A + i * 3;
+                if o + 2 < d.len() {
+                    println!("  zone {i}: {:02X}{:02X}{:02X}", d[o], d[o + 1], d[o + 2]);
+                }
+            }
+        }
+        (Some(z), Some((hex, c))) => {
             // safe-write: read -> modify -> write -> verify -> restore on failure
             let orig = b.get_color_table()?.data;
             if orig.len() < 0x2A {
@@ -696,6 +710,8 @@ fn kbd(zone: Option<u8>, color: Option<&str>) -> anyhow::Result<()> {
             }
         }
         (Some(_), None) => anyhow::bail!("--color <hex> required with a zone"),
+        // Guarded at function entry; unreachable in practice.
+        (None, Some(_)) => unreachable!("guarded at function entry"),
     }
     Ok(())
 }
