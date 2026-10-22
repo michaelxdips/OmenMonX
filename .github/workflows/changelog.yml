@@ -1,0 +1,50 @@
+name: changelog
+
+# Regenerates CHANGELOG.md from commit history at tag time. Runs on the
+# release workflow's tag push; the file is committed back to master so the
+# repo always carries a current changelog without hand-editing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build changelog from tags
+        shell: bash
+        run: |
+          {
+            echo "# Changelog"
+            echo
+            echo "Generated from tagged releases; each section lists the"
+            echo "commits between the previous tag and this one."
+            echo
+            for tag in $(git tag --sort=-creatordate); do
+              echo "## $tag"
+              git log "$tag^..$tag" --pretty="- %s" 2>/dev/null || \
+                git log "$tag" -1 --pretty="- %s"
+              echo
+            done
+          } > CHANGELOG.md
+          cat CHANGELOG.md
+
+      - name: Commit if changed
+        shell: bash
+        run: |
+          if ! git diff --quiet CHANGELOG.md; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add CHANGELOG.md
+            git commit -m "docs: regenerate CHANGELOG.md for ${{ github.ref_name }}"
+            git push origin HEAD:${GITHUB_REF_NAME%-*} 2>/dev/null || \
+              git push origin HEAD:master
+          fi

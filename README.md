@@ -9,7 +9,7 @@ accounts, no spinners: it talks to your firmware and shows you the answer.
 reference machine with real workloads — nothing is aspirational. What the
 firmware refuses is documented too, with the evidence.
 
-![crates](https://img.shields.io/badge/crates-5-blue) ![tests](https://img.shields.io/badge/tests-97%20passing-brightgreen) ![platform](https://img.shields.io/badge/Windows-10%2B-blueviolet) ![license](https://img.shields.io/badge/license-GPL--3.0-orange)
+[![crates](https://img.shields.io/badge/crates-5-blue)](https://github.com/michaelxdips/OmenMonX) [![tests](https://img.shields.io/badge/tests-103%20passing-brightgreen)](https://github.com/michaelxdips/OmenMonX/actions) [![platform](https://img.shields.io/badge/Windows-10%2B-blueviolet)](https://github.com/michaelxdips/OmenMonX) [![license](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
 
 ## What you get
 
