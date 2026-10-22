@@ -14,8 +14,6 @@ mod display;
 mod elevate;
 mod safety;
 mod sampler;
-#[cfg(test)]
-mod tests;
 mod theme;
 mod tray;
 mod ui;

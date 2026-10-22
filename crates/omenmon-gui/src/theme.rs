@@ -719,7 +719,7 @@ mod tests {
         assert!(g.span_w(available, 4) > g.span_w(available, 3));
     }
 
-    /// Anti-slop rule: no colour literal outside this file.
+    /// Design rule: no colour literal outside this file.
     ///
     /// This is the verifier's rule from the design brief, enforced where it can
     /// actually stop a regression. It scans the crate's own sources, so adding

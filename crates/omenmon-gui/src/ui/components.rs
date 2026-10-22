@@ -161,7 +161,7 @@ pub fn write_feedback(ui: &mut egui::Ui, p: &Palette, st: &SharedState, pending_
 ///
 /// The value is right-aligned in the numeric family so a column of numbers lines
 /// up; the label is never centred, because a centred paragraph is on the
-/// anti-slop list.
+/// design rules.
 pub fn kv_row(ui: &mut egui::Ui, p: &Palette, key: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(

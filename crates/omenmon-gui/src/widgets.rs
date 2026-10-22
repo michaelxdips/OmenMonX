@@ -126,7 +126,7 @@ pub fn meter(ui: &mut Ui, p: &Palette, label: &str, value_text: &str, fraction: 
 /// A card with a title row and an optional right-aligned action area.
 ///
 /// One raised surface, one hairline border, one padding step. Cards are never
-/// nested: a card inside a card is on the anti-slop list because it makes the
+/// nested: a card inside a card is against the design rules because it makes the
 /// two elevations indistinguishable.
 pub fn card(ui: &mut Ui, p: &Palette, title: &str, body: impl FnOnce(&mut Ui)) {
     elevation::raised(p).show(ui, |ui| {

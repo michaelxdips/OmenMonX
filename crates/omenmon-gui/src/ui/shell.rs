@@ -104,7 +104,7 @@ impl App {
     ///
     /// Bottom-up layout, so the first thing added is the lowest. Each control is
     /// a real toggle with a persisted value: a control that does nothing is on
-    /// the anti-slop list.
+    /// the design rules.
     fn rail_status(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
             if let Some(e) = &st.last_error {
