@@ -164,6 +164,11 @@ pub struct SharedState {
     /// Fan count from 0x10. Shown instead of an RPM, because the EC tachometer at
     /// 0xC4 is frozen on this board and a stale number would be a lie.
     pub fan_count: Option<u8>,
+    /// Bumped every time `fan_table` is refreshed (every 20th tick). The fan
+    /// curve is static firmware data; the dashboard uses this to rebuild the
+    /// plot series only when the table actually changed instead of every
+    /// 250 ms repaint frame.
+    pub fan_table_gen: u64,
     /// Live clock, MHz. Sampled cheaply so the cap's effect is visible.
     pub clock_mhz: f32,
     /// Latched clock-sampling failure. Once typeperf fails, it is not retried;
@@ -412,6 +417,7 @@ fn sampler_loop(
                                 }
                                 if let Some(f) = fan_table {
                                     st.fan_table = Some(f);
+                                    st.fan_table_gen = st.fan_table_gen.wrapping_add(1);
                                 }
                                 if let Some(f) = fan_count {
                                     st.fan_count = Some(f);

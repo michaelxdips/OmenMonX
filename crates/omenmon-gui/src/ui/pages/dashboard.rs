@@ -249,16 +249,30 @@ impl App {
                 return;
             }
             ui.add_space(space::SM);
-            let fans = t.fan_count as usize;
-            let series: Vec<Vec<[f64; 2]>> = (0..fans.min(3))
-                .map(|f| {
-                    t.points
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, pt)| pt.duty(f, t.fan_count).map(|d| [i as f64, d as f64]))
-                        .collect()
-                })
-                .collect();
+            // The fan curve is static firmware data, but this card runs on the
+            // 250 ms repaint loop. Rebuilding the point series every frame
+            // allocates for nothing; rebuild only when the sampler actually
+            // refreshed the table (generation counter), else reuse the cache.
+            if self.curve_cache_gen != st.fan_table_gen || self.curve_cache.is_none() {
+                let fans = t.fan_count as usize;
+                self.curve_cache = Some(
+                    (0..fans.min(3))
+                        .map(|f| {
+                            t.points
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(i, pt)| {
+                                    pt.duty(f, t.fan_count).map(|d| [i as f64, d as f64])
+                                })
+                                .collect::<Vec<[f64; 2]>>()
+                        })
+                        .collect::<Vec<Vec<[f64; 2]>>>(),
+                );
+                self.curve_cache_gen = st.fan_table_gen;
+            }
+            let Some(series) = &self.curve_cache else {
+                return;
+            };
             // Series identity is not colour-only: a legend names every fan, and
             // the palette cycles through four distinguishable channels.
             let palette = [p.cpu, p.gpu, p.text, p.dim];

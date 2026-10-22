@@ -12,6 +12,7 @@ mod crash;
 mod diag;
 mod display;
 mod elevate;
+mod perf;
 mod safety;
 mod sampler;
 mod theme;
@@ -88,6 +89,12 @@ struct App {
     /// app kept running with no window and no explanation. Verified by driving a
     /// real tray menu: the process was still alive after Quit.
     quitting: bool,
+    /// Debug frame counter, active only with `OMENMON_PERF=1`.
+    perf: perf::PerfHud,
+    /// Cached fan-curve plot series and the `fan_table_gen` it was built
+    /// from, so the dashboard does not rebuild static data every frame.
+    curve_cache: Option<Vec<Vec<[f64; 2]>>>,
+    curve_cache_gen: u64,
 }
 
 impl App {
@@ -140,6 +147,9 @@ impl App {
             recover,
             crashed,
             quitting: false,
+            perf: perf::PerfHud::from_env(),
+            curve_cache: None,
+            curve_cache_gen: 0,
         };
         app.updates.check_async();
         app.refresh_rates();
@@ -227,6 +237,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.perf.frame_begin();
         // Repaint floor. The 250 ms default keeps clocks and status text
         // fresh without busy-looping; event-driven repaints (sampler ticks,
         // tray messages, input) land sooner on their own. When the window
@@ -321,6 +332,8 @@ impl eframe::App for App {
                         theme::Page::System => self.page_system(ui, &p, &st),
                     });
             });
+
+        self.perf.frame_end();
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
