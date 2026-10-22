@@ -42,6 +42,11 @@ enum Command {
         /// balanced | performance | cool
         mode: Option<String>,
     },
+    /// Fan speed: max, auto (hand back to firmware), or a manual percentage
+    Fan {
+        /// max | auto | 0-100
+        setting: Option<String>,
+    },
     /// Keyboard color table: show, or set one zone's RGB
     Kbd {
         /// Show the color table, or a zone number 0..3 to set
@@ -79,6 +84,7 @@ fn main() -> anyhow::Result<()> {
         Command::Cap { watts } => power_cap(watts)?,
         Command::Curve => fan_curve()?,
         Command::Thermal { mode } => thermal(mode.as_deref())?,
+        Command::Fan { setting } => fan(setting.as_deref())?,
         Command::Kbd { zone, color } => kbd(zone, color.as_deref())?,
         Command::Apply => apply_saved()?,
         Command::RestoreDefaults => restore_defaults()?,
@@ -179,15 +185,17 @@ fn status() -> anyhow::Result<()> {
             .map(console::temp_c)
             .unwrap_or("n/a".into())
     );
+    // The EC tachometer at 0xC4 reads a frozen 1249 rpm on this board, so it is
+    // not printed: a constant presented as a measurement is worse than no number.
+    // The level byte is live and is the honest readout.
     println!(
-        "fan: {} RPM @ level {}",
-        s.fan_rpm.map(|v| v.to_string()).unwrap_or("n/a".into()),
+        "fan: level {}",
         s.fan_level_pct
             .map(|v| format!("{v} %"))
             .unwrap_or("n/a".into())
     );
     println!(
-        "curve target: {} % (informational only - 0x2E/0x32 are no-ops on this board)",
+        "curve target: {} % (read-only; the curve cannot be written)",
         st.target_fan_pct
     );
     let b = hp_core::battery::read_battery();
@@ -384,7 +392,7 @@ fn fan_curve() -> anyhow::Result<()> {
     let b = bios()?;
     let t = b.get_fan_table_parsed()?;
     println!(
-        "fan curve: {} fans, {} points (read-only - 0x2E and 0x32 are no-ops here)",
+        "fan curve: {} fans, {} points (read-only; speed is set via 0x27/0x2E, not by writing the curve)",
         t.fan_count, t.level_count
     );
     println!("{}", "=".repeat(52));
@@ -490,6 +498,61 @@ fn bios_settings(name: Option<&str>, set: Option<&str>) -> anyhow::Result<()> {
                     println!("Unexpected return code {c}; nothing was assumed.");
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Fan speed control.
+///
+/// `max` is verified working on this board (0x27). `auto` releases max mode, which
+/// needs a 0x2E write as well — 0x27 off alone leaves the fans pinned. A number
+/// sets a manual duty through 0x2E.
+fn fan(setting: Option<&str>) -> anyhow::Result<()> {
+    let b = bios()?;
+    let (before, _) = b.fan_levels()?;
+    match setting {
+        None => {
+            let (a, g) = b.fan_levels()?;
+            println!("fan levels: cpu={a} gpu={g} (live 0x2D read)");
+            println!("  max-fan flag: {:02X?}", b.get_max_fan()?.data.get(..1));
+            println!("\nusage: omenmon fan max | auto | <0-100>");
+        }
+        Some("max") => {
+            b.set_max_fan(true)?;
+            // Spool time: reading immediately reports the old level.
+            let mut peak = before;
+            for _ in 0..8 {
+                std::thread::sleep(std::time::Duration::from_millis(900));
+                peak = peak.max(b.fan_levels()?.0);
+            }
+            println!("max fan: level {before} -> {peak}");
+            if peak > before.saturating_add(5) {
+                println!("verified.");
+            } else {
+                println!("WARNING: level did not rise; firmware may have ignored 0x27.");
+            }
+            println!("run `omenmon fan auto` to hand the fans back to the firmware");
+        }
+        Some("auto") | Some("release") => {
+            let after = b.release_max_fan()?;
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let settled = b.fan_levels()?.0;
+            println!("released max mode: level {before} -> {after} -> {settled}");
+            println!("(0x27 off alone does not release the fans; a 0x2E write does)");
+        }
+        Some(other) => {
+            let pct: u8 = other
+                .parse()
+                .map_err(|_| anyhow::anyhow!("expected max | auto | 0-100, got '{other}'"))?;
+            if pct > 100 {
+                anyhow::bail!("duty must be 0-100, got {pct}");
+            }
+            b.set_sw_fan_control(1, pct, pct, pct)?;
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+            let after = b.fan_levels()?.0;
+            println!("manual {pct}%: level {before} -> {after}");
+            println!("run `omenmon fan auto` to hand the fans back to the firmware");
         }
     }
     Ok(())

@@ -55,7 +55,46 @@ impl Bios {
         self.ok(Request::new(CMD_DEFAULT, 0x2D), 128)
     }
 
-    /// 0x2E SetFanLevel — {fan1_level, fan2_level, ...}.
+    /// 0x2E SetSwFanControlLevel — software fan control.
+    ///
+    /// **Payload is `{mode, cpu_pct, gpu_pct, fan3_pct}`**, matching OMEN Gaming
+    /// Hub's own call site, whose log line is
+    /// `SetSwFanControlLevel(), {0}, cpuFanSpeed={1}, gpuFanSpeed={2}, fan3Speed={3}`.
+    /// Byte 0 is a mode selector, not a speed.
+    ///
+    /// This is **verified working on board 8C9C**, and it is the command that
+    /// releases the fans after `0x27` max mode: with mode 1 at 20 %, the live
+    /// level byte fell 58 → 4 within ten seconds. An earlier conclusion that
+    /// "0x2E is a silent no-op" was wrong — that test wrote fan-table dB indices
+    /// into bytes 0-1, which is a different (and meaningless) payload.
+    ///
+    /// Mode semantics are not fully mapped. Mode 1 with a speed is proven to take
+    /// effect; mode 0 is believed to hand control back to the firmware, but that
+    /// is unverified, so callers should not depend on it.
+    pub fn set_sw_fan_control(&self, mode: u8, cpu: u8, gpu: u8, fan3: u8) -> Result<()> {
+        self.ok(
+            Request::with_data(CMD_DEFAULT, 0x2E, &[mode, cpu, gpu, fan3]),
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// 0x2D GetFanLevel — per-fan current level. Bytes 0 and 1 are the two fans.
+    ///
+    /// This is a **live** read: its values move with load and with commands, and
+    /// they do not always correspond to a row of the 0x2F fan table. That is what
+    /// makes it usable as an observable for fan-control tests. (The EC tachometer
+    /// at 0xC4 is *not* usable — it reads a frozen 1249 rpm on this board, so a
+    /// test that watches it will report "no effect" for every control.)
+    pub fn fan_levels(&self) -> Result<(u8, u8)> {
+        let r = self.get_fan_level()?;
+        Ok((
+            r.data.first().copied().unwrap_or(0),
+            r.data.get(1).copied().unwrap_or(0),
+        ))
+    }
+
+    /// 0x2E SetFanLevel — legacy per-fan level form.
     pub fn set_fan_level(&self, levels: &[u8]) -> Result<()> {
         self.ok(Request::with_data(CMD_DEFAULT, 0x2E, levels), 0)?;
         Ok(())
@@ -66,10 +105,37 @@ impl Bios {
         self.ok(Request::new(CMD_DEFAULT, 0x26), 4)
     }
 
-    /// 0x27 SetMaxFan — {0 = off, 1 = on} per OmenMon semantics.
+    /// 0x27 SetMaxFan — `{1,0,0,0}` spins the fans to maximum.
+    ///
+    /// **Verified working on board 8C9C**, twice: the live level byte rose
+    /// 23 → 59 and 21 → 58, monotonic, well outside the 4-point idle drift.
+    ///
+    /// **Turning it off does not work with `{0,0,0,0}`.** Verified failing three
+    /// ways: the off payload twice, and re-asserting the thermal profile, all left
+    /// the level pinned at 58-59 for 25 s. The fans only came down after
+    /// [`Bios::set_sw_fan_control`] was called. So `off` here is best-effort and
+    /// callers must follow it with a 0x2E write — see [`Bios::release_max_fan`].
     pub fn set_max_fan(&self, on: bool) -> Result<()> {
         self.ok(Request::with_data(CMD_DEFAULT, 0x27, &[u8::from(on), 0, 0, 0]), 0)?;
         Ok(())
+    }
+
+    /// Leave max-fan mode and hand the fans back to the firmware.
+    ///
+    /// `set_max_fan(false)` alone is not enough on this board: the level stays
+    /// pinned at maximum. A 0x2E manual write is what actually releases it, so
+    /// this does both and reports the level it observed afterwards.
+    ///
+    /// The 0x2E write uses a low speed so the fans audibly spool down; passing
+    /// `None` sends mode 0, which is *intended* to mean "firmware controlled" but
+    /// is unverified, so the measured level is returned either way and the caller
+    /// can tell the user what really happened.
+    pub fn release_max_fan(&self) -> Result<u8> {
+        let _ = self.set_max_fan(false);
+        self.set_sw_fan_control(1, 20, 20, 20)?;
+        std::thread::sleep(std::time::Duration::from_millis(900));
+        let (a, _b) = self.fan_levels()?;
+        Ok(a)
     }
 
     /// 0x1A SetFanMode — e.g. 0x30 default, 0x31 performance, 0x50 cool.
@@ -901,6 +967,60 @@ mod tests {
         assert_eq!(payload[1], 0xFF);
         assert_eq!(payload[2], 0xFF);
         assert_eq!(payload[3], 30, "byte 3 must be the TDP value");
+    }
+
+    // ---- Fan control: the payload shapes that were verified on hardware ----
+
+    /// 0x2E is `{mode, cpu, gpu, fan3}`, not `{fan1, fan2, ...}`.
+    ///
+    /// This distinction is the whole reason the old probe concluded "0x2E is a
+    /// no-op": it wrote table dB indices into bytes 0-1, which the firmware reads
+    /// as a mode and a speed. The shape is pinned here so it cannot regress.
+    #[test]
+    fn sw_fan_control_payload_is_mode_then_speeds() {
+        let (mode, cpu, gpu, fan3) = (1u8, 20u8, 20u8, 20u8);
+        let payload = [mode, cpu, gpu, fan3];
+        assert_eq!(payload[0], 1, "byte 0 is the mode, not a speed");
+        assert_eq!(&payload[1..], &[20, 20, 20], "bytes 1-3 are per-fan speeds");
+        assert_eq!(payload.len(), 4, "a longer payload is a different command form");
+    }
+
+    /// 0x27 max-fan takes a single 0/1 in byte 0.
+    #[test]
+    fn max_fan_payload_is_one_byte_flag() {
+        let on = [1u8, 0, 0, 0];
+        let off = [0u8, 0, 0, 0];
+        assert_eq!(on[0], 1);
+        assert_eq!(off[0], 0);
+        assert_eq!(&on[1..], &[0, 0, 0], "the tail is padding");
+    }
+
+    /// Max-fan OFF alone does not release the fans on this board.
+    ///
+    /// Recorded as a test because it is the kind of thing that gets "simplified"
+    /// later: a reader sees `set_max_fan(false)` and deletes the 0x2E write that
+    /// follows it, and the fans stay stuck at maximum. The verified release path
+    /// is 0x27 off *plus* a 0x2E write, so `release_max_fan` must contain both.
+    #[test]
+    fn release_max_fan_uses_both_commands() {
+        let src = include_str!("commands.rs");
+        let body = src
+            .split("pub fn release_max_fan")
+            .nth(1)
+            .and_then(|s| s.split("/// 0x1A SetFanMode").next())
+            .expect("release_max_fan must exist");
+        assert!(
+            body.contains("set_max_fan(false)"),
+            "must clear the max-fan flag first"
+        );
+        assert!(
+            body.contains("set_sw_fan_control"),
+            "0x27 off alone leaves the fans pinned; a 0x2E write is what releases them"
+        );
+        assert!(
+            body.contains("fan_levels"),
+            "the observed level must be returned, not assumed"
+        );
     }
 }
 

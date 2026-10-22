@@ -43,14 +43,24 @@ const CAPABILITIES: &[(&str, Cap, &str)] = &[
     ),
     ("Fan curve read", Cap::Works, "0x2F, 42 points, 2 fans"),
     (
+        "Fan max mode",
+        Cap::Works,
+        "0x27 {1,0,0,0}: live level 23\u{2192}59, verified twice",
+    ),
+    (
+        "Fan manual speed",
+        Cap::Works,
+        "0x2E {mode,cpu,gpu,fan3}: level 58\u{2192}4 at 20 %, verified",
+    ),
+    (
         "Refresh rate",
         Cap::Works,
         "Win32 EnumDisplaySettings + CDS_TEST",
     ),
     (
-        "Software fan control",
+        "Software fan curve write",
         Cap::Dead,
-        "0x2E and 0x32 are silent no-ops on 8C9C",
+        "0x32 rejected; 0x2E takes a mode+speeds, not a curve",
     ),
     (
         "Battery charge limit",

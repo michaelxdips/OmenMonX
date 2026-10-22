@@ -14,6 +14,8 @@ mod display;
 mod elevate;
 mod safety;
 mod sampler;
+#[cfg(test)]
+mod tests;
 mod theme;
 mod tray;
 mod ui;
@@ -30,6 +32,20 @@ use updater::UpdateHandle;
 const ZOOM_MIN: f32 = 0.8;
 const ZOOM_MAX: f32 = 2.0;
 const ZOOM_STEP: f32 = 0.1;
+
+/// Should a window-close be turned into a hide-to-tray?
+///
+/// Three inputs decide it, and the third was the bug: the tray's Quit also closes
+/// the window, so without `quitting` the handler cancelled that close and hid the
+/// window instead. The app then kept running with no window and no way to tell it
+/// apart from a crash — found by driving a real tray menu and watching the process
+/// stay alive after Quit.
+///
+/// A pure function so the three-way interaction is testable; it was previously an
+/// inline condition that read as two-way and silently lost the third case.
+fn should_hide_on_close(close_to_tray: bool, tray_present: bool, quitting: bool) -> bool {
+    close_to_tray && tray_present && !quitting
+}
 
 /// Clamp a zoom factor into the range the layout actually survives.
 ///
@@ -65,6 +81,14 @@ struct App {
     recover: Option<safety::Pending>,
     /// A crash from the previous run, shown once and then dropped.
     crashed: Option<crash::PreviousCrash>,
+    /// Set when the user chose Quit, so the close-to-tray handler does not turn
+    /// that close into a hide.
+    ///
+    /// Without this, Quit-while-visible sent `ViewportCommand::Close`, the
+    /// close-to-tray branch intercepted it and hid the window instead, and the
+    /// app kept running with no window and no explanation. Verified by driving a
+    /// real tray menu: the process was still alive after Quit.
+    quitting: bool,
 }
 
 impl App {
@@ -101,6 +125,7 @@ impl App {
             diag: String::new(),
             recover,
             crashed,
+            quitting: false,
         };
         app.updates.check_async();
         app.refresh_rates();
@@ -203,6 +228,10 @@ impl eframe::App for App {
                     tray::TrayCommand::Quit => {
                         self.persist_window(ctx);
                         self.sampler.stop();
+                        // Tell the close handler this close is a real quit, not a
+                        // request to hide. Without the flag the handler cancels it
+                        // and the app stays alive with no window.
+                        self.quitting = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 }
@@ -226,7 +255,10 @@ impl eframe::App for App {
         let hist = self.sampler.history.lock().clone();
 
         // Close-to-tray: intercept the window close and hide instead.
-        if self.ui.close_to_tray && self.tray.is_some() {
+        //
+        // Skipped when `quitting` is set, because the tray's Quit also closes the
+        // window and must actually end the process.
+        if should_hide_on_close(self.ui.close_to_tray, self.tray.is_some(), self.quitting) {
             let close = ctx.input(|i| i.viewport().close_requested());
             if close {
                 self.persist_window(ctx);
@@ -310,89 +342,5 @@ fn window_icon() -> egui::IconData {
         rgba: tray::icon_rgba(),
         width: 16,
         height: 16,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// P1-4. The zoom clamp is what stops a persisted or hand-edited value from
-    /// making the window unusable, so its bounds are worth pinning.
-    #[test]
-    fn zoom_is_clamped_to_a_usable_range() {
-        assert_eq!(clamp_zoom(1.0), 1.0);
-        assert_eq!(clamp_zoom(0.1), ZOOM_MIN);
-        assert_eq!(clamp_zoom(9.0), ZOOM_MAX);
-        assert_eq!(clamp_zoom(f32::NAN), 1.0);
-        assert_eq!(clamp_zoom(f32::INFINITY), ZOOM_MAX);
-        // A step from either end cannot escape the range.
-        assert!(clamp_zoom(ZOOM_MAX + ZOOM_STEP) <= ZOOM_MAX);
-        assert!(clamp_zoom(ZOOM_MIN - ZOOM_STEP) >= ZOOM_MIN);
-    }
-
-    /// The window icon must be the tray icon: same buffer, same dimensions, and
-    /// the size must match the pixel data or the platform rejects it.
-    #[test]
-    fn window_icon_matches_the_tray_icon() {
-        let icon = window_icon();
-        assert_eq!(icon.width as usize * icon.height as usize * 4, icon.rgba.len());
-        assert_eq!(icon.rgba, tray::icon_rgba());
-    }
-
-    /// P1-3. The sticky-cap policy must be visible to the user, not just
-    /// implemented. Checked against the page source so the copy cannot be deleted
-    /// while the behaviour stays sticky — that combination is worse than either
-    /// alone, because the machine throttles with no explanation.
-    #[test]
-    fn sticky_cap_policy_is_stated_in_the_ui() {
-        let src = include_str!("ui/pages/performance.rs");
-        assert!(
-            src.contains("This cap stays until you change it or press Restore stock"),
-            "the power card must state that the cap persists"
-        );
-        assert!(
-            src.contains("re-applied at every login"),
-            "and say what keeps it applied"
-        );
-    }
-
-    /// P1-5. The window must carry the app's icon, not the default blank frame.
-    #[test]
-    fn viewport_is_built_with_an_icon() {
-        let src = include_str!("main.rs");
-        assert!(
-            src.contains(".with_icon(window_icon())"),
-            "the viewport must set an icon"
-        );
-    }
-
-    /// P2-1. The shell must stay a shell. This is the structural half of the
-    /// split: a page that creeps back into `main.rs` would undo it silently, and
-    /// the file size is the only thing that makes the regression visible.
-    #[test]
-    fn main_stays_a_shell() {
-        let src = include_str!("main.rs");
-        let lines = src.lines().count();
-        assert!(
-            lines < 400,
-            "main.rs is {lines} lines; pages belong in ui/pages"
-        );
-        // Built from parts so this assertion's own text cannot satisfy it.
-        let marker = ["fn ", "page_", "dashboard"].concat();
-        assert!(
-            !src.contains(&marker),
-            "page bodies must live in ui/pages"
-        );
-    }
-
-    /// `FLASH_MS` is a UI timing constant, so it is imported where it is used
-    /// rather than duplicated as a literal in a page.
-    #[test]
-    fn flash_window_is_a_single_constant() {
-        let flash = crate::ui::components::FLASH_MS;
-        assert!(flash >= 1_000, "a shorter flash is unreadable");
-        let pages = include_str!("ui/pages/performance.rs");
-        assert!(!pages.contains("1_600"), "the flash duration must come from the constant");
     }
 }

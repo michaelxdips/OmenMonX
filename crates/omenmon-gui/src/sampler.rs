@@ -21,8 +21,15 @@ use std::time::{Duration, Instant};
 pub enum ControlRequest {
     /// Set the CPU power cap, in watts. Clamped by the API to the proven window.
     SetPowerCap(u8),
-    /// Switch thermal mode.
+    /// Set the thermal profile.
     SetThermal(hp_wmi::ThermalMode),
+    /// Spin the fans to maximum (OGH's "Max" mode).
+    SetMaxFan(bool),
+    /// Hand the fans back to the firmware after max mode.
+    ///
+    /// Separate from `SetMaxFan(false)` because that alone does not release them
+    /// on this board: the level stays pinned at maximum until a 0x2E write lands.
+    ReleaseMaxFan,
     /// Put the cap back to the firmware default.
     RestoreDefault,
     /// Write one zone's colour. Read-modify-write inside the sampler.
@@ -145,8 +152,15 @@ pub struct SharedState {
     pub limits: Option<hp_wmi::CpuPowerLimits>,
     /// 0x28[8] thermal status byte.
     pub thermal_status: u8,
-    /// Firmware fan curve (read-only; 0x2E/0x32 are no-ops on this board).
+    /// Firmware fan curve (read-only).
+    ///
+    /// Reading the curve works (0x2F); *writing* it (0x32) does not. Fan speed
+    /// itself is controllable through 0x27 (max) and 0x2E (manual) — see
+    /// [`ControlRequest::SetMaxFan`].
     pub fan_table: Option<hp_wmi::FanTable>,
+    /// Fan count from 0x10. Shown instead of an RPM, because the EC tachometer at
+    /// 0xC4 is frozen on this board and a stale number would be a lie.
+    pub fan_count: Option<u8>,
     /// Live clock, MHz. Sampled cheaply so the cap's effect is visible.
     pub clock_mhz: f32,
     /// Result of the most recent control write, for the UI to show verbatim.
@@ -281,6 +295,7 @@ impl Sampler {
                                 }
                                 if tick % 20 == 0 {
                                     st.fan_table = b.get_fan_table_parsed().ok();
+                                    st.fan_count = b.get_fan_count().ok();
                                 }
                                 if tick % 2 == 1 {
                                     st.clock_mhz = read_clock_mhz().unwrap_or(0.0);
@@ -375,6 +390,8 @@ fn apply_control(
         ControlRequest::SetPowerCap(w) => set_cap(b, *w),
         ControlRequest::RestoreDefault => restore_stock(b),
         ControlRequest::SetThermal(m) => set_thermal(b, *m),
+        ControlRequest::SetMaxFan(on) => set_max_fan(b, *on),
+        ControlRequest::ReleaseMaxFan => release_max_fan(b),
         ControlRequest::SetZone { zone, rgb } => set_zone(b, *zone, *rgb),
         ControlRequest::RestoreRgb => restore_rgb(b, pristine_rgb),
         ControlRequest::SetBacklight(v) => set_backlight(b, *v),
@@ -431,6 +448,66 @@ fn persist(req: &ControlRequest, report: &WriteReport) -> Option<String> {
         // The colour table and BIOS settings have no config representation: they
         // live in the firmware and survive a reboot on their own.
         _ => None,
+    }
+}
+
+/// Spin the fans to maximum and confirm the level actually rose.
+///
+/// Verification is against 0x2D, which is a live read. It is **not** against the
+/// EC tachometer at 0xC4: that register reads a frozen 1249 rpm on this board, so
+/// a check based on it would report success or failure at random.
+fn set_max_fan(b: &hp_wmi::Bios, on: bool) -> WriteReport {
+    let before = b.fan_levels().map(|(a, _)| a).unwrap_or(0);
+    if let Err(e) = b.set_max_fan(on) {
+        return failed(format!("max fan failed: {e}"));
+    }
+    // The fans take several seconds to spool. Sampling too early reads the old
+    // level and would report a working control as broken.
+    let mut peak = before;
+    for _ in 0..8 {
+        std::thread::sleep(Duration::from_millis(900));
+        if let Ok((a, _)) = b.fan_levels() {
+            peak = peak.max(a);
+        }
+    }
+    if !on {
+        // Turning the flag off is not enough on this board; say so rather than
+        // reporting a success the user can hear is not true.
+        return adjusted(
+            "max-fan flag cleared, but the fans stay pinned until you press \
+             \"Hand back to firmware\""
+                .to_string(),
+        );
+    }
+    if peak > before.saturating_add(5) {
+        ok(format!("fans at maximum (level {before} → {peak}, verified)"))
+    } else {
+        failed(format!(
+            "max fan accepted but level did not rise ({before} → {peak})"
+        ))
+    }
+}
+
+/// Release max mode and hand the fans back to the firmware.
+fn release_max_fan(b: &hp_wmi::Bios) -> WriteReport {
+    let before = b.fan_levels().map(|(a, _)| a).unwrap_or(0);
+    match b.release_max_fan() {
+        Ok(after) => {
+            // Sample again: one read right after the write can still catch the old
+            // value while the fans spool down.
+            std::thread::sleep(Duration::from_millis(1500));
+            let settled = b.fan_levels().map(|(a, _)| a).unwrap_or(after);
+            if settled < before || settled <= 30 {
+                ok(format!(
+                    "fans handed back to firmware (level {before} → {settled}, verified)"
+                ))
+            } else {
+                adjusted(format!(
+                    "release sent, but level is still {settled} (was {before})"
+                ))
+            }
+        }
+        Err(e) => failed(format!("release failed: {e}")),
     }
 }
 

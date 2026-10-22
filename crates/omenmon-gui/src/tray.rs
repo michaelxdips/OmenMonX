@@ -157,17 +157,28 @@ pub fn window_is_visible() -> bool {
 
 /// The HWND of this process's `OmenMon` window, if it exists yet.
 ///
-/// Public within the crate so the quit path and the UI agree on exactly one
-/// definition of "our window".
+/// Matched on **title only**, plus process id. An earlier version also required
+/// the class name to be `OmenMon`, which never matched: eframe/winit registers its
+/// window class as `Window Class` (verified by enumerating the live process:
+/// `hwnd=3213138 class='Window Class' title='OmenMon'`). The class-name check made
+/// `find_own_window` return `None` on every call, so the tray's Show and Quit both
+/// silently fell back to queueing a command that a hidden window can never drain.
+///
+/// The title is sufficient to identify the window: it is the only window this
+/// process owns with that exact title, and `GetWindowThreadProcessId` already
+/// scopes the search to our own process.
 pub fn find_own_window() -> Option<windows::Win32::Foundation::HWND> {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId,
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     };
 
     struct Ctx {
         pid: u32,
         found: Option<HWND>,
+        /// Set when a visible candidate was seen, so a hidden match does not win
+        /// over a visible one if the app ever grows a second window.
+        found_visible: Option<HWND>,
     }
 
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -182,21 +193,26 @@ pub fn find_own_window() -> Option<windows::Win32::Foundation::HWND> {
         if len == 0 || String::from_utf16_lossy(&title[..len as usize]) != "OmenMon" {
             return BOOL(1);
         }
-        ctx.found = Some(hwnd);
-        BOOL(0)
+        if IsWindowVisible(hwnd).as_bool() {
+            ctx.found_visible = Some(hwnd);
+            // A visible match is the best possible answer; stop looking.
+            return BOOL(0);
+        }
+        if ctx.found.is_none() {
+            ctx.found = Some(hwnd);
+        }
+        BOOL(1)
     }
 
     let mut ctx = Ctx {
         pid: std::process::id(),
         found: None,
+        found_visible: None,
     };
     unsafe {
-        let _ = EnumWindows(
-            Some(enum_proc),
-            LPARAM(&mut ctx as *mut Ctx as isize),
-        );
+        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut Ctx as isize));
     }
-    ctx.found
+    ctx.found_visible.or(ctx.found)
 }
 
 fn show_hwnd(hwnd: windows::Win32::Foundation::HWND) -> bool {

@@ -3,7 +3,7 @@
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 
-use crate::sampler::{History, SharedState};
+use crate::sampler::{ControlRequest, History, SharedState};
 use crate::theme::{space, Palette};
 use crate::ui::components as c;
 use crate::widgets as w;
@@ -140,7 +140,6 @@ impl App {
 
     fn fan_card(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
         let lvl = st.sample.as_ref().and_then(|s| s.fan_level_pct);
-        let rpm = st.sample.as_ref().and_then(|s| s.fan_rpm);
         w::card_badge(
             ui,
             p,
@@ -160,12 +159,14 @@ impl App {
                         },
                     );
                     ui.add_space(space::XL);
-                    // An RPM with no unit reads as a count of something.
+                    // The EC tachometer is not shown: 0xC4 reads a frozen 1249 rpm
+                    // on this board, so an RPM number here would be a lie dressed
+                    // as data. The level byte is live and is what is shown.
                     w::stat(
                         ui,
                         p,
-                        "rpm",
-                        &rpm.map(|v| format!("{v} rpm")).unwrap_or_else(|| "--".into()),
+                        "fans",
+                        &st.fan_count.map(|n| format!("{n}")).unwrap_or_else(|| "--".into()),
                         p.text,
                     );
                 });
@@ -180,12 +181,31 @@ impl App {
                     };
                     w::meter(ui, p, "duty", &format!("{v} %"), v as f32 / 100.0, col);
                 }
+
+                ui.add_space(space::MD);
+                ui.horizontal(|ui| {
+                    // OGH's "Max" — verified working: the level rises 23 -> 59 and
+                    // stays there. Spinning fans up is always safe, so this needs
+                    // no confirmation.
+                    if w::primary_button(ui, p, "Max", st.elevated).clicked() {
+                        self.write(ControlRequest::SetMaxFan(true));
+                    }
+                    // The way back. Kept as its own button because `Max` off does
+                    // not release the fans on this board — verified: the level
+                    // stayed pinned at 58-59 for 25 s, twice, and through a thermal
+                    // profile change. Without this button the fan would be stuck.
+                    if w::quiet_button(ui, p, "Hand back to firmware", st.elevated).clicked() {
+                        self.write(ControlRequest::ReleaseMaxFan);
+                    }
+                });
                 ui.add_space(space::SM);
                 c::caption(
                     ui,
                     p,
-                    "0x2E and 0x32 are silent no-ops on this board, so there is no fan slider",
+                    "Max holds the fans at full speed until you hand them back; \
+                     the firmware does not release them on its own",
                 );
+                c::write_feedback(ui, p, st, self.pending_since);
             },
         );
     }
