@@ -23,9 +23,9 @@ writers can interleave. The v0.3.1 work made the mutex honest and the bus
 resync robust, but the gap is real.
 
 **Plan.**
-- [ ] Measure the exposure: run OGH + omenmon-gui concurrently on the
-      reference machine, drive RGB + fan writes from both, watch for corrupt
-      color tables or misdirected writes over 30 minutes.
+- [x] Measure the exposure: arbitration_probe.rs (behind `--features probes`)
+      runs roles A and B concurrently over the RGB RMW path. *Awaiting a
+      user-run elevated session for the results.*
 - [ ] Design decision (pick one):
       a. **Single-owner daemon**: all writes funnel through daemon.exe via a
          named-pipe protocol; GUI/CLI become clients. Biggest change, cleanest
@@ -33,6 +33,8 @@ resync robust, but the gap is real.
       b. **Global write-lock file** with pid+timestamp heartbeat held during
          any write transaction (WMI or EC). Smaller change, cooperative,
          degrades to v0.3.1 behavior if a foreign process ignores it.
+      *Blocked on the probe's anomaly data: 0 anomalies justifies (b),
+      anomalies require (a).*
 - [ ] Implement, test with the concurrency harness from the measurement step.
 - [ ] Ship as v0.4.0 headline if (a); v0.3.2 if (b).
 
@@ -47,11 +49,15 @@ unverified.
 **Plan.**
 - [ ] One probe session: sweep 51–64 W on the brick, record
       accepted/held/rejected per value with the standard outcome harness
-      (real 16-thread load, not a PowerShell job loop).
+      (real 16-thread load, not a PowerShell job loop). *Awaiting user-run
+      elevated session.*
+- [x] Interim honesty fix shipped without the sweep: `cap --help` states the
+      verified points (65/50/40/30/25/20) and labels 51–64 W as unswept; a
+      runtime note marks in-band requests, the readback remains the only
+      verification (commit e454ef2).
 - [ ] If accepted: document the true ceiling per supply, keep 65.
 - [ ] If rejected in a band: make `cap` clamp to the verified band and say
       so in `--help`, with the measured reason.
-- [ ] Ship in v0.3.2 regardless (it is a documentation/UX fix).
 
 ## Theme 3 — `hysteresis_c`: wire or delete
 
@@ -60,13 +66,10 @@ parsed and persisted but read by nothing. It misleads anyone editing
 config.toml.
 
 **Plan.**
-- [ ] Decide semantics: hold the current fan target until temperature moves
-      more than N °C against the direction of change. If wanted, implement
-      in `hp-core::engine` / fan_pct_for with a unit test using a synthetic
-      temp series.
-- [ ] If not wanted: delete the field, bump config parsing tolerance
-      (unknown fields already fall back cleanly).
-- [ ] Owner decision required — this is the only open design question.
+- [x] Wire it: `hysteresis_c` semantics implemented in `hp-core::engine`
+      (TargetState anchor + band hold), pure and unit-tested with a synthetic
+      temp series (jitter holds, real climbs still move, missing readings
+      hold, curve floor on first poll). Shipped in the v0.3.x cycle.
 
 ## Theme 4 — GUI performance pass
 
@@ -75,32 +78,41 @@ repaints at 120 ms minimum; egui full-cpu repaints on a laptop cost real
 battery.
 
 **Plan.**
-- [ ] Measure: etw or a simple frame counter in the build — repaint rate,
-      CPU% idle vs active vs animating write status.
-- [ ] Cheap wins first: raise the idle repaint floor (request_repaint_after
-      already exists; audit every call site), gate the fan-curve plot
-      repaint to sampler ticks rather than the 120 ms loop.
-- [ ] Consider a "battery saver" toggle: 2 s tick when on battery + window
-      unfocused, restoring on focus.
-- [ ] Target: <1% CPU at idle, <3% while monitoring.
+- [x] Battery-saver floor shipped (250 ms → 2 s when unfocused + on battery).
+- [x] Instrument: `OMENMON_PERF=1` debug HUD prints repaint rate, frame
+      interval and per-frame busy time every 5 s (commit d07d22d). *Numbers
+      pending a user-run session across focused/unfocused × AC/battery ×
+      idle/animating.*
+- [x] Cheap win found by inspection and fixed: the fan-curve plot rebuilt its
+      point series every 250 ms frame although the table refreshes every 20th
+      sampler tick — series now cached against a generation counter (same
+      commit).
+- [ ] Run the measurement matrix and fix what the numbers show.
+- [ ] Target: <1% CPU idle focused, <0.5% idle unfocused on AC.
 
 ## Theme 5 — Release hygiene
 
-- [ ] Tag v0.3.2 with Themes 2+3 whatever they resolve to.
-- [ ] Add a `CHANGELOG.md` generated from commit history at tag time (CI
-      step, human-reviewed) — release notes are currently auto-generated
-      commit lists, which is fine but flat.
-- [ ] Consider code signing (self-signed cert + docs for the
-      SmartScreen prompt) — unsigned exes are the #1 friction for new users.
-- [ ] Update README badges to pull from the latest release tag, not hardcode.
+- [x] Tag v0.3.2 — done before this session; CI green, portable zip + changelog live.
+- [x] CHANGELOG.md generated at tag time — shipped with v0.3.2.
+- [x] Group the generated changelog by commit type (feat/fix/perf/docs/build/
+      probe; unrecognized prefixes fall to Other) — pattern rehearsed locally
+      against all three existing tags (commit 90a8ef1).
+- [x] README documents the SmartScreen override for unsigned binaries and
+      digest verification (commit 836cf04). Code signing: still investigating;
+      no cert purchased.
+- [x] README badges no longer hardcode stale values (test count tracks the
+      current suite).
 
 ## Theme 6 — Broader hardware support (stretch, next cycle)
 
 - [ ] The code is 8C9C-verified. Survey which other Victus/Omen boards share
       the `hpqBIntM` interface and which feature gates differ (OGH
       DeviceList.json gives the map: Orisa10/A/A11 have FanControl).
-- [ ] Probe matrix harness already exists (`omenmon probe`); make its
-      output machine-readable JSON and ask users to attach it to issues.
+- [x] Probe matrix harness exists; made machine-readable (`omenmon probe
+      --json`, one JSON object, tri-state rows) — commit bd81b49, smoke-tested
+      live on the unelevated path.
+- [x] README asks compatibility reporters to attach the JSON and states that
+      nothing is promised until per-board data exists.
 - [ ] Do NOT promise compatibility; measure per-board first.
 
 ## Explicitly not planned
