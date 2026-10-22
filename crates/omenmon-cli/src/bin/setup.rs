@@ -24,6 +24,30 @@ fn exe_dir() -> PathBuf {
     std::env::current_exe().unwrap().parent().unwrap().to_path_buf()
 }
 
+/// The PowerShell that registers the logon task.
+///
+/// Split out so the two things that make it correct are testable without
+/// registering anything on the machine:
+///
+/// * the action runs **`apply`**, not `status`. The firmware resets power limits
+///   and the thermal profile on every boot, so a saved cap only survives a reboot
+///   if something re-applies it. `status` only prints, which meant a cap chosen in
+///   the GUI was gone after a restart with nothing to restore it.
+/// * the principal runs at **Highest**. `0x29` and `0x2A` are admin-only, so an
+///   unelevated logon task would call `apply`, get access-denied, and leave the
+///   machine at the firmware default while looking like it had restored the cap.
+fn logon_task_script() -> String {
+    format!(
+        "$a = New-ScheduledTaskAction -Execute 'C:\\Program Files\\OmenMon\\omenmon.exe' -Argument 'apply'; \
+         $t = New-ScheduledTaskTrigger -AtLogOn; \
+         $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries \
+              -ExecutionTimeLimit (New-TimeSpan -Minutes 5); \
+         $p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest; \
+         Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $a -Trigger $t -Settings $s \
+              -Principal $p -Force | Out-Null"
+    )
+}
+
 fn install() -> anyhow::Result<()> {
     println!("OmenMon-rs installer");
     println!("{}", "=".repeat(50));
@@ -76,12 +100,7 @@ fn install() -> anyhow::Result<()> {
     add_to_user_path(INSTALL_DIR)?;
 
     // 3. scheduled task via PowerShell ScheduledTasks module (robust quoting)
-    let ps = format!(
-        "$a = New-ScheduledTaskAction -Execute 'C:\\Program Files\\OmenMon\\omenmon.exe' -Argument 'status'; \
-         $t = New-ScheduledTaskTrigger -AtLogOn; \
-         $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; \
-         Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $a -Trigger $t -Settings $s -Force | Out-Null"
-    );
+    let ps = logon_task_script();
     let out = Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
         .output()?;
@@ -89,7 +108,7 @@ fn install() -> anyhow::Result<()> {
         let err = String::from_utf8_lossy(&out.stderr);
         anyhow::bail!("task registration failed: {err}");
     }
-    println!("autostart  task '{TASK_NAME}' registered (logon telemetry snapshot)");
+    println!("autostart  task '{TASK_NAME}' registered (elevated, re-applies the saved cap at logon)");
 
     // 4. Add/Remove Programs entry (PowerShell for robust quoting)
     let uninstaller = PathBuf::from(INSTALL_DIR).join("omenmon-setup.exe");
@@ -169,4 +188,38 @@ fn add_to_user_path(dir: &str) -> anyhow::Result<()> {
     }
     println!("PATH       {dir} appended (new terminals)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P1-1's regression test. The logon task must re-apply the saved state; a
+    /// task that only prints leaves the firmware at its boot default and the
+    /// user's cap silently gone.
+    #[test]
+    fn logon_task_applies_the_saved_state() {
+        let s = logon_task_script();
+        assert!(s.contains("-Argument 'apply'"), "must run `apply`, got: {s}");
+        assert!(
+            !s.contains("-Argument 'status'"),
+            "`status` only prints; the firmware would stay at its boot default"
+        );
+    }
+
+    /// `0x29`/`0x2A` are admin-only, so the task must run elevated or `apply`
+    /// fails with access-denied while looking like it worked.
+    #[test]
+    fn logon_task_runs_elevated() {
+        let s = logon_task_script();
+        assert!(s.contains("RunLevel Highest"), "an unelevated apply cannot write 0x29");
+        assert!(s.contains("-AtLogOn"), "it is a logon trigger");
+        assert!(s.contains(TASK_NAME), "it registers the expected task name");
+    }
+
+    /// A hung `omenmon apply` must not leave a task running forever.
+    #[test]
+    fn logon_task_has_a_time_limit() {
+        assert!(logon_task_script().contains("ExecutionTimeLimit"));
+    }
 }

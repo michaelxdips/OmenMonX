@@ -84,12 +84,26 @@ impl Config {
         Self::default()
     }
 
+    /// Load from an explicit path. Used by tests so they never touch the real
+    /// user config, and available to any caller that needs to read a config that
+    /// is not the active one.
+    pub fn load_from(p: &std::path::Path) -> Self {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|t| toml::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
     pub fn save(&self) -> std::io::Result<()> {
-        let p = Self::path();
+        self.save_to(&Self::path())
+    }
+
+    /// Write to an explicit path, creating the parent directory.
+    pub fn save_to(&self, p: &std::path::Path) -> std::io::Result<()> {
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&p, toml::to_string_pretty(self).unwrap_or_default())
+        std::fs::write(p, toml::to_string_pretty(self).unwrap_or_default())
     }
 
     /// Parse the persisted thermal mode string.
@@ -113,6 +127,27 @@ impl Config {
     /// Persist a thermal mode by its CLI name. Pass `None` to clear it.
     pub fn set_thermal_mode(&mut self, mode: Option<&str>) {
         self.thermal_mode = mode.map(|s| s.to_string());
+    }
+
+    /// Record a control write that the firmware will forget on the next boot.
+    ///
+    /// Both the GUI and the CLI go through this, which is the point: before it
+    /// existed the GUI wrote the hardware and never told the config, so a cap set
+    /// in the GUI was invisible to `omenmon apply` and vanished on exit while the
+    /// CLI's own cap survived a reboot.
+    ///
+    /// `None` clears the stored value, because "restore the firmware's own block"
+    /// is a state worth remembering too — a saved cap that the user has since
+    /// removed must not be re-applied at the next login.
+    pub fn record_power_cap(&mut self, watts: Option<u8>) -> std::io::Result<()> {
+        self.set_power_cap(watts);
+        self.save()
+    }
+
+    /// Record a thermal profile write. See [`Config::record_power_cap`].
+    pub fn record_thermal_mode(&mut self, mode: Option<&str>) -> std::io::Result<()> {
+        self.set_thermal_mode(mode);
+        self.save()
     }
 
     /// Interpolate the curve at a given temperature.
@@ -140,4 +175,116 @@ fn dirs_next_home() -> PathBuf {
     std::env::var("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory per test, so tests never touch the real user config.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "omenmon-config-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// P1-2's contract, at the level the GUI and CLI both rely on: a cap written
+    /// through the shared API lands in the file and reads back. The GUI used to
+    /// write hardware and skip this entirely, so `omenmon apply` could not see a
+    /// cap the user had just set in the UI.
+    #[test]
+    fn recorded_power_cap_lands_in_the_file() {
+        let dir = scratch("cap");
+        let p = dir.join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.set_power_cap(Some(45));
+        cfg.save_to(&p).unwrap();
+
+        let back = Config::load_from(&p);
+        assert_eq!(back.power_cap_watts, Some(45));
+
+        // Clearing is a state too: a cap the user removed must not come back at
+        // the next login.
+        let mut cfg = back;
+        cfg.set_power_cap(None);
+        cfg.save_to(&p).unwrap();
+        assert_eq!(Config::load_from(&p).power_cap_watts, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The thermal profile follows the same rule as the cap: a GUI write that has
+    /// a config representation must persist it, or the CLI and GUI disagree about
+    /// what the machine is set to.
+    #[test]
+    fn recorded_thermal_mode_round_trips() {
+        let dir = scratch("thermal");
+        let p = dir.join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.set_thermal_mode(Some("performance"));
+        cfg.save_to(&p).unwrap();
+
+        let back = Config::load_from(&p);
+        assert_eq!(back.thermal_mode_parsed(), Some("performance"));
+
+        let mut cfg = back;
+        cfg.set_thermal_mode(Some("cool"));
+        cfg.save_to(&p).unwrap();
+        assert_eq!(Config::load_from(&p).thermal_mode_parsed(), Some("cool"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A saved cap must survive being written next to every other setting, so the
+    /// GUI recording a cap cannot drop the user's fan profile.
+    #[test]
+    fn recording_a_cap_preserves_unrelated_settings() {
+        let dir = scratch("preserve");
+        let p = dir.join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.profile.name = "quiet".into();
+        cfg.battery_health_warn_pct = 55;
+        cfg.set_power_cap(Some(30));
+        cfg.save_to(&p).unwrap();
+
+        let mut back = Config::load_from(&p);
+        back.set_power_cap(Some(50));
+        back.save_to(&p).unwrap();
+
+        let back = Config::load_from(&p);
+        assert_eq!(back.power_cap_watts, Some(50));
+        assert_eq!(back.profile.name, "quiet");
+        assert_eq!(back.battery_health_warn_pct, 55);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A corrupt file must not take the app down; it falls back to defaults.
+    #[test]
+    fn corrupt_config_falls_back_to_defaults() {
+        let dir = scratch("corrupt");
+        let p = dir.join("config.toml");
+        std::fs::write(&p, "this is not toml {{{").unwrap();
+        let c = Config::load_from(&p);
+        assert_eq!(c.power_cap_watts, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unknown thermal mode is "not set", not a guess at Balanced: a typo must
+    /// not silently change machine behaviour.
+    #[test]
+    fn unknown_thermal_mode_is_not_a_mode() {
+        let c = Config {
+            thermal_mode: Some("turbo".into()),
+            ..Default::default()
+        };
+        assert_eq!(c.thermal_mode_parsed(), None);
+    }
 }

@@ -13,6 +13,7 @@
 //! * `0x2A` is a limits block and is labelled as one. It is never "live power".
 //! * Nothing is claimed to work without a readback behind it.
 
+mod crash;
 mod display;
 mod elevate;
 mod safety;
@@ -24,13 +25,35 @@ mod widgets;
 
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
-use sampler::{BiosRow, ControlRequest, RgbState, Sampler, SharedState, WriteOutcome, WriteReport};
+use sampler::{BiosRow, ControlRequest, Sampler, SharedState, WriteOutcome};
 use theme::{Page, Palette, Theme, UiState, BODY, DISPLAY, LABEL, RAIL_W};
 use updater::UpdateHandle;
 use widgets as w;
 
 /// How long a write result stays bright before settling to a quieter tone.
 const FLASH_MS: u64 = 1_600;
+
+/// Zoom limits. Below 0.8 the 11 px label step stops being legible; above 2.0 a
+/// card no longer fits the 940 px minimum window and text starts to clip.
+const ZOOM_MIN: f32 = 0.8;
+const ZOOM_MAX: f32 = 2.0;
+const ZOOM_STEP: f32 = 0.1;
+
+/// Clamp a zoom factor into the range the layout actually survives.
+///
+/// Separate from the key handler so the bounds are testable: a persisted value
+/// from a future version, or a hand-edited ui.toml, must not be able to make the
+/// window unusable.
+///
+/// NaN is the one input with no sensible clamp — it is not "very large" or "very
+/// small", it is a broken number — so it falls back to 1.0. Infinities do have a
+/// direction, so they clamp to the end they point at.
+fn clamp_zoom(z: f32) -> f32 {
+    if z.is_nan() {
+        return 1.0;
+    }
+    z.clamp(ZOOM_MIN, ZOOM_MAX)
+}
 
 struct App {
     sampler: Sampler,
@@ -48,6 +71,8 @@ struct App {
     rate_msg: Option<(String, bool)>,
     diag: String,
     recover: Option<safety::Pending>,
+    /// A crash from the previous run, shown once and then dropped.
+    crashed: Option<crash::PreviousCrash>,
 }
 
 impl App {
@@ -55,6 +80,9 @@ impl App {
         let ui = UiState::load();
         let p = Palette::of(ui.theme);
         theme::apply(&cc.egui_ctx, &p);
+        // Apply the persisted zoom before the first frame, so a user at 150% does
+        // not see one frame at 100% and a window that resizes itself.
+        cc.egui_ctx.set_zoom_factor(clamp_zoom(ui.zoom));
 
         let elevated = elevate::is_elevated();
         let (tray, tray_error) = match tray::Tray::new() {
@@ -63,11 +91,12 @@ impl App {
         };
 
         let recover = safety::unrecovered();
+        let crashed = crash::take_previous_crash();
 
         let mut app = Self {
             sampler: Sampler::spawn(1000, elevated),
             updates: UpdateHandle::default(),
-            install_dir: install_dir_guess(),
+            install_dir: updater::resolve_install_target().dir.display().to_string(),
             ui,
             tray,
             tray_error,
@@ -79,6 +108,7 @@ impl App {
             rate_msg: None,
             diag: String::new(),
             recover,
+            crashed,
         };
         app.updates.check_async();
         app.refresh_rates();
@@ -191,16 +221,6 @@ impl App {
     }
 }
 
-fn install_dir_guess() -> String {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    if dir.starts_with(r"C:\Program Files") {
-        dir.to_string_lossy().to_string()
-    } else {
-        r"C:\Program Files\OmenMon".into()
-    }
-}
-
 /// Short git hash baked in at build time, or "unknown" for a plain checkout.
 fn build_hash() -> &'static str {
     option_env!("OMENMON_BUILD_HASH").unwrap_or("unknown")
@@ -209,6 +229,8 @@ fn build_hash() -> &'static str {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
+
+        self.handle_zoom_keys(ctx);
 
         // ---- tray commands ----
         if let Some(t) = &self.tray {
@@ -289,6 +311,9 @@ impl eframe::App for App {
                 if let Some(rec) = self.recover.clone() {
                     self.recover_banner(ui, &p, &rec);
                 }
+                if self.crashed.is_some() {
+                    self.crash_banner(ui, &p);
+                }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.ui.page {
@@ -308,6 +333,39 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Ctrl++ / Ctrl+- / Ctrl+0, with the result persisted.
+    ///
+    /// The zoom is a preference, not a transient: a user on a 4K panel sets it
+    /// once and expects it back next launch. It is applied through egui's own
+    /// zoom factor rather than by scaling font sizes, so every widget — including
+    /// the ones that compute their own metrics — scales consistently.
+    fn handle_zoom_keys(&mut self, ctx: &egui::Context) {
+        let (plus, minus, reset) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Plus)
+                    || i.consume_key(egui::Modifiers::COMMAND, egui::Key::Equals),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Minus),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0),
+            )
+        });
+        if !(plus || minus || reset) {
+            return;
+        }
+        let next = if reset {
+            1.0
+        } else if plus {
+            self.ui.zoom + ZOOM_STEP
+        } else {
+            self.ui.zoom - ZOOM_STEP
+        };
+        let next = clamp_zoom(next);
+        if (next - self.ui.zoom).abs() > f32::EPSILON {
+            self.ui.zoom = next;
+            self.ui.save();
+            ctx.set_zoom_factor(next);
+        }
+    }
+
     fn persist_window(&mut self, ctx: &egui::Context) {
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.ui.window = Some([rect.width(), rect.height()]);
@@ -564,9 +622,55 @@ impl App {
                             safety::clear();
                             self.recover = None;
                         }
-                        if w::primary_button(ui, p, "Restore 25 W", true).clicked() {
+                        if w::primary_button(ui, p, "Restore stock", true).clicked() {
                             self.write(ControlRequest::RestoreDefault);
                             self.recover = None;
+                        }
+                    });
+                });
+            });
+        ui.add_space(12.0);
+    }
+
+    /// "The last run crashed" plus where the log is.
+    ///
+    /// Shown once: the marker is consumed when it is read, because a banner that
+    /// reappears on every launch after a single crash trains the user to dismiss
+    /// it without reading.
+    fn crash_banner(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let Some(c) = self.crashed.clone() else { return };
+        egui::Frame::default()
+            .fill(p.tint(p.red, 22))
+            .stroke(egui::Stroke::new(1.0_f32, p.tint(p.red, 80)))
+            .rounding(8.0)
+            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("The last run crashed")
+                                .size(BODY)
+                                .color(p.text)
+                                .family(theme::proportional()),
+                        );
+                        ui.label(
+                            egui::RichText::new(&c.summary)
+                                .size(LABEL)
+                                .color(p.dim)
+                                .family(theme::numeric()),
+                        );
+                        if let Some(log) = &c.log {
+                            ui.label(
+                                egui::RichText::new(format!("log: {}", log.display()))
+                                    .size(LABEL)
+                                    .color(p.faint())
+                                    .family(theme::numeric()),
+                            );
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if w::quiet_button(ui, p, "Dismiss", true).clicked() {
+                            self.crashed = None;
                         }
                     });
                 });
@@ -1118,6 +1222,21 @@ impl App {
                         .family(theme::proportional()),
                 );
             });
+            // P1-3's decision, stated where the control is rather than in a
+            // changelog: the cap is sticky. It is written to config.toml and
+            // re-applied by the logon task, so it survives a reboot. Leaving that
+            // implicit is how a user ends up with a throttled machine and no idea
+            // why.
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(
+                    "This cap stays until you change it or press Restore stock — it is saved \
+                     and re-applied at every login, including after a reboot.",
+                )
+                .size(LABEL)
+                .color(p.dim)
+                .family(theme::proportional()),
+            );
             self.write_feedback(ui, p, st);
         });
     }
@@ -1687,6 +1806,35 @@ impl App {
                             );
                         });
                     }
+                    // Consent for code execution needs to say what will run and
+                    // that it was verified. A bare "Download & install" button is
+                    // not informed consent.
+                    if let (Some(name), Some(digest)) = (&s.asset_name, &s.digest) {
+                        let short = digest
+                            .strip_prefix("sha256:")
+                            .map(|h| &h[..12])
+                            .unwrap_or(digest.as_str());
+                        ui.label(
+                            egui::RichText::new(format!("asset: {name}"))
+                                .size(LABEL)
+                                .color(p.dim)
+                                .family(theme::numeric()),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("sha256 {short}… — checked before running"))
+                                .size(LABEL)
+                                .color(p.faint())
+                                .family(theme::numeric()),
+                        );
+                    }
+                    if let Some(why) = &s.refusal {
+                        ui.label(
+                            egui::RichText::new(format!("\u{2717} {why}"))
+                                .size(LABEL)
+                                .color(p.amber)
+                                .family(theme::proportional()),
+                        );
+                    }
                     let busy = s.busy;
                     let available = s.available;
                     drop(s);
@@ -1697,15 +1845,36 @@ impl App {
                         }
                         if available && w::primary_button(ui, p, "Download & install", !busy).clicked()
                         {
-                            self.updates.update_async(&self.install_dir);
+                            self.updates.update_async();
                         }
                     });
                     let s = self.updates.0.lock();
+                    if let Some((done, total)) = s.progress {
+                        let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                        w::meter(
+                            ui,
+                            p,
+                            "download",
+                            &format!("{} / {} KiB", done / 1024, total / 1024),
+                            frac,
+                            p.accent,
+                        );
+                    }
                     if let Some(m) = &s.done_msg {
-                        ui.label(egui::RichText::new(m).size(LABEL).color(p.green));
+                        ui.label(
+                            egui::RichText::new(m)
+                                .size(LABEL)
+                                .color(p.green)
+                                .family(theme::proportional()),
+                        );
                     }
                     if let Some(e) = &s.err {
-                        ui.label(egui::RichText::new(e).size(LABEL).color(p.red));
+                        ui.label(
+                            egui::RichText::new(e)
+                                .size(LABEL)
+                                .color(p.red)
+                                .family(theme::proportional()),
+                        );
                     }
                     ui.label(
                         egui::RichText::new(format!("installs to {}", self.install_dir))
@@ -1713,6 +1882,37 @@ impl App {
                             .color(p.faint())
                             .family(theme::proportional()),
                     );
+                    // What the detached helper did last time. Without this the
+                    // helper's verdict is written and never read, which is the
+                    // same silent failure the errorlevel checks exist to prevent.
+                    if let Some(r) = updater::read_last_result() {
+                        let (glyph, colour, text) = if r.ok {
+                            (
+                                "\u{2713}",
+                                p.green,
+                                format!("last install succeeded ({})", r.step),
+                            )
+                        } else {
+                            (
+                                "\u{2717}",
+                                p.red,
+                                format!(
+                                    "last install FAILED at {}{}",
+                                    r.step,
+                                    r.dest
+                                        .as_deref()
+                                        .map(|d| format!(" → {d}"))
+                                        .unwrap_or_default()
+                                ),
+                            )
+                        };
+                        ui.label(
+                            egui::RichText::new(format!("{glyph} {text}"))
+                                .size(LABEL)
+                                .color(colour)
+                                .family(theme::proportional()),
+                        );
+                    }
                 });
                 ui.add_space(12.0);
                 w::card(ui, p, "DIAGNOSTICS", |ui| {
@@ -1800,13 +2000,19 @@ enum Cap {
 }
 
 fn main() -> eframe::Result<()> {
+    // Before anything can panic: a GUI crash used to leave no artifact at all.
+    crash::install_panic_hook();
+
     let ui = UiState::load();
     let size = ui.window.unwrap_or([1180.0, 780.0]);
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(size)
             .with_min_inner_size([940.0, 620.0])
-            .with_title("OmenMon"),
+            .with_title("OmenMon")
+            // The tray already draws an icon at runtime; the window should carry
+            // the same mark rather than the default blank frame.
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -1816,7 +2022,69 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Type names the UI refers to but the compiler cannot see used when a card is
-/// compiled out; kept so the imports stay honest.
-#[allow(dead_code)]
-fn _type_markers(_: &WriteReport, _: &RgbState) {}
+/// The tray's generated RGBA, as viewport icon data.
+///
+/// One definition of the app's mark: the tray and the title bar cannot drift
+/// apart, and the build still ships no binary asset.
+fn window_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: tray::icon_rgba(),
+        width: 16,
+        height: 16,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P1-4. The zoom clamp is what stops a persisted or hand-edited value from
+    /// making the window unusable, so its bounds are worth pinning.
+    #[test]
+    fn zoom_is_clamped_to_a_usable_range() {
+        assert_eq!(clamp_zoom(1.0), 1.0);
+        assert_eq!(clamp_zoom(0.1), ZOOM_MIN);
+        assert_eq!(clamp_zoom(9.0), ZOOM_MAX);
+        assert_eq!(clamp_zoom(f32::NAN), 1.0);
+        assert_eq!(clamp_zoom(f32::INFINITY), ZOOM_MAX);
+        // A step from either end cannot escape the range.
+        assert!(clamp_zoom(ZOOM_MAX + ZOOM_STEP) <= ZOOM_MAX);
+        assert!(clamp_zoom(ZOOM_MIN - ZOOM_STEP) >= ZOOM_MIN);
+    }
+
+    /// The window icon must be the tray icon: same buffer, same dimensions, and
+    /// the size must match the pixel data or the platform rejects it.
+    #[test]
+    fn window_icon_matches_the_tray_icon() {
+        let icon = window_icon();
+        assert_eq!(icon.width as usize * icon.height as usize * 4, icon.rgba.len());
+        assert_eq!(icon.rgba, tray::icon_rgba());
+    }
+
+    /// P1-3. The sticky-cap policy must be visible to the user, not just
+    /// implemented. Checked against this file's own source so the copy cannot be
+    /// deleted while the behaviour stays sticky — that combination is worse than
+    /// either alone, because the machine throttles with no explanation.
+    #[test]
+    fn sticky_cap_policy_is_stated_in_the_ui() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("This cap stays until you change it or press Restore stock"),
+            "the power card must state that the cap persists"
+        );
+        assert!(
+            src.contains("re-applied at every login"),
+            "and say what keeps it applied"
+        );
+    }
+
+    /// P1-5. The window must carry the app's icon, not the default blank frame.
+    #[test]
+    fn viewport_is_built_with_an_icon() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains(".with_icon(window_icon())"),
+            "the viewport must set an icon"
+        );
+    }
+}

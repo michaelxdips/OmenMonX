@@ -54,6 +54,10 @@ pub struct WriteReport {
     pub outcome: WriteOutcome,
     /// When it finished, so the UI can flash and then fade.
     pub at: Instant,
+    /// For a power-cap write, the wattage the firmware actually held. `None`
+    /// for every other channel. Persistence saves this, not the request, so a
+    /// cap the firmware clamped is not replayed at its unclamped value.
+    pub held_watts: Option<u8>,
 }
 
 /// The colour table as the firmware holds it, plus the pristine copy.
@@ -252,6 +256,7 @@ impl Sampler {
                                     message: "no BIOS interface: cannot write (run elevated)".into(),
                                     outcome: WriteOutcome::Failed,
                                     at: Instant::now(),
+                                    held_watts: None,
                                 });
                             }
                         }
@@ -330,15 +335,30 @@ impl Sampler {
 }
 
 fn ok(msg: impl Into<String>) -> WriteReport {
-    WriteReport { message: msg.into(), outcome: WriteOutcome::Verified, at: Instant::now() }
+    WriteReport {
+        message: msg.into(),
+        outcome: WriteOutcome::Verified,
+        at: Instant::now(),
+        held_watts: None,
+    }
 }
 
 fn adjusted(msg: impl Into<String>) -> WriteReport {
-    WriteReport { message: msg.into(), outcome: WriteOutcome::Adjusted, at: Instant::now() }
+    WriteReport {
+        message: msg.into(),
+        outcome: WriteOutcome::Adjusted,
+        at: Instant::now(),
+        held_watts: None,
+    }
 }
 
 fn failed(msg: impl Into<String>) -> WriteReport {
-    WriteReport { message: msg.into(), outcome: WriteOutcome::Failed, at: Instant::now() }
+    WriteReport {
+        message: msg.into(),
+        outcome: WriteOutcome::Failed,
+        at: Instant::now(),
+        held_watts: None,
+    }
 }
 
 /// Execute a control write and describe exactly what the firmware did.
@@ -347,51 +367,120 @@ fn apply_control(
     req: ControlRequest,
     pristine_rgb: &mut Option<Vec<u8>>,
 ) -> WriteReport {
-    match req {
-        ControlRequest::SetPowerCap(w) => set_cap(b, w),
+    // A write that has a config representation must persist it, or the GUI and
+    // the CLI disagree about what the machine is set to and the logon task
+    // re-applies a stale value. Persistence is keyed on the *verified* outcome,
+    // not on the request, so a refused write never becomes a saved preference.
+    let mut report = match &req {
+        ControlRequest::SetPowerCap(w) => set_cap(b, *w),
         ControlRequest::RestoreDefault => restore_stock(b),
-        ControlRequest::SetThermal(m) => match b.set_fan_mode_verified(m) {
-            Ok(observed) => {
-                let expected = m.expected_status();
-                if observed == expected {
-                    ok(format!("thermal mode applied, firmware status {observed:#04X} (verified)"))
-                } else {
-                    failed(format!(
-                        "thermal mode not applied: status {observed:#04X}, expected {expected:#04X}"
-                    ))
-                }
-            }
-            Err(e) => failed(format!("thermal mode failed: {e}")),
-        },
-        ControlRequest::SetZone { zone, rgb } => set_zone(b, zone, rgb),
-        ControlRequest::RestoreRgb => match pristine_rgb.clone() {
-            Some(t) => match b.set_color_table(&t) {
-                Ok(()) => {
-                    std::thread::sleep(Duration::from_millis(250));
-                    match b.get_color_table() {
-                        Ok(r) if r.data == t => ok("colour table restored byte-for-byte (verified)"),
-                        Ok(_) => failed("restore written but readback differs"),
-                        Err(e) => failed(format!("restore written, readback failed: {e}")),
-                    }
-                }
-                Err(e) => failed(format!("restore failed: {e}")),
+        ControlRequest::SetThermal(m) => set_thermal(b, *m),
+        ControlRequest::SetZone { zone, rgb } => set_zone(b, *zone, *rgb),
+        ControlRequest::RestoreRgb => restore_rgb(b, pristine_rgb),
+        ControlRequest::SetBacklight(v) => set_backlight(b, *v),
+        ControlRequest::SetBios { name, value } => set_bios(b, name, value),
+    };
+    if let Some(note) = persist(&req, &report) {
+        report.message.push_str(&note);
+    }
+    report
+}
+
+/// Persist the config half of a write that succeeded.
+///
+/// Returns a suffix for the write-feedback message so the user is told whether
+/// the choice will survive a reboot — silence about persistence is how a user
+/// ends up with a machine that is throttled after a restart with no explanation.
+fn persist(req: &ControlRequest, report: &WriteReport) -> Option<String> {
+    let ok = matches!(
+        report.outcome,
+        WriteOutcome::Verified | WriteOutcome::Adjusted
+    );
+    if !ok {
+        return None;
+    }
+    let mut cfg = hp_core::Config::load();
+    match req {
+        ControlRequest::SetPowerCap(w) => {
+            // Save what the firmware actually held, not what was asked for: a
+            // request clamped from 65 W to 25 W on USB-C must not be replayed as
+            // 65 W at the next login.
+            let held = report.held_watts.unwrap_or(*w);
+            Some(match cfg.record_power_cap(Some(held)) {
+                Ok(()) => format!(" · saved {held} W for next login"),
+                Err(e) => format!(" · WARNING: could not save the cap: {e}"),
+            })
+        }
+        ControlRequest::RestoreDefault => Some(
+            match cfg.record_power_cap(None) {
+                Ok(()) => " · cleared the saved cap".to_string(),
+                Err(e) => format!(" · WARNING: could not clear the saved cap: {e}"),
             },
-            None => failed("no original colour table captured yet"),
-        },
-        ControlRequest::SetBacklight(v) => match b.set_backlight(v) {
+        ),
+        ControlRequest::SetThermal(m) => {
+            let name = match m {
+                hp_wmi::ThermalMode::Balanced => "balanced",
+                hp_wmi::ThermalMode::Performance => "performance",
+                hp_wmi::ThermalMode::Cool => "cool",
+            };
+            Some(match cfg.record_thermal_mode(Some(name)) {
+                Ok(()) => format!(" · saved thermal profile '{name}'"),
+                Err(e) => format!(" · WARNING: could not save the profile: {e}"),
+            })
+        }
+        // The colour table and BIOS settings have no config representation: they
+        // live in the firmware and survive a reboot on their own.
+        _ => None,
+    }
+}
+
+/// Set the thermal profile and verify it against the firmware's own status byte.
+fn set_thermal(b: &hp_wmi::Bios, m: hp_wmi::ThermalMode) -> WriteReport {
+    match b.set_fan_mode_verified(m) {
+        Ok(observed) => {
+            let expected = m.expected_status();
+            if observed == expected {
+                ok(format!("thermal mode applied, firmware status {observed:#04X} (verified)"))
+            } else {
+                failed(format!(
+                    "thermal mode not applied: status {observed:#04X}, expected {expected:#04X}"
+                ))
+            }
+        }
+        Err(e) => failed(format!("thermal mode failed: {e}")),
+    }
+}
+
+fn restore_rgb(b: &hp_wmi::Bios, pristine_rgb: &Option<Vec<u8>>) -> WriteReport {
+    match pristine_rgb.clone() {
+        Some(t) => match b.set_color_table(&t) {
             Ok(()) => {
-                std::thread::sleep(Duration::from_millis(200));
-                match b.get_backlight() {
-                    Ok(now) if now == v => ok(format!("backlight set to {v:#04X} (verified)")),
-                    Ok(now) => adjusted(format!(
-                        "backlight {v:#04X} read back as {now:#04X} — firmware adjusted it"
-                    )),
-                    Err(e) => failed(format!("backlight written, readback failed: {e}")),
+                std::thread::sleep(Duration::from_millis(250));
+                match b.get_color_table() {
+                    Ok(r) if r.data == t => ok("colour table restored byte-for-byte (verified)"),
+                    Ok(_) => failed("restore written but readback differs"),
+                    Err(e) => failed(format!("restore written, readback failed: {e}")),
                 }
             }
-            Err(e) => failed(format!("backlight failed: {e}")),
+            Err(e) => failed(format!("restore failed: {e}")),
         },
-        ControlRequest::SetBios { name, value } => set_bios(b, &name, &value),
+        None => failed("no original colour table captured yet"),
+    }
+}
+
+fn set_backlight(b: &hp_wmi::Bios, v: u8) -> WriteReport {
+    match b.set_backlight(v) {
+        Ok(()) => {
+            std::thread::sleep(Duration::from_millis(200));
+            match b.get_backlight() {
+                Ok(now) if now == v => ok(format!("backlight set to {v:#04X} (verified)")),
+                Ok(now) => adjusted(format!(
+                    "backlight {v:#04X} read back as {now:#04X} — firmware adjusted it"
+                )),
+                Err(e) => failed(format!("backlight written, readback failed: {e}")),
+            }
+        }
+        Err(e) => failed(format!("backlight failed: {e}")),
     }
 }
 
@@ -445,11 +534,14 @@ fn set_cap(b: &hp_wmi::Bios, w: u8) -> WriteReport {
         Ok(l) => {
             if l.pl1 == applied {
                 crate::safety::write(&crate::safety::Pending::settled(w, applied));
-                if applied == w {
+                let mut r = if applied == w {
                     ok(format!("cap set to {applied} W (verified)"))
                 } else {
                     adjusted(format!("cap {w} W clamped to {applied} W by firmware"))
-                }
+                };
+                // The readback is the truth, so this is what gets persisted.
+                r.held_watts = Some(l.pl1);
+                r
             } else {
                 crate::safety::write(
                     &crate::safety::Pending::now(w, crate::safety::Phase::Written)

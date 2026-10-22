@@ -125,10 +125,19 @@ pub struct UiState {
     /// Refresh-rate preference, in Hz. `None` = leave the panel alone.
     #[serde(default)]
     pub refresh_hz: Option<u32>,
+    /// UI zoom factor. Applied with `ctx.set_zoom_factor`, so it scales every
+    /// widget rather than only the font sizes. Persisted because a user on a 4K
+    /// panel sets it once and expects it back.
+    #[serde(default = "default_zoom")]
+    pub zoom: f32,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn default_zoom() -> f32 {
+    1.0
 }
 
 impl Default for UiState {
@@ -140,6 +149,7 @@ impl Default for UiState {
             compact: false,
             close_to_tray: true,
             refresh_hz: None,
+            zoom: 1.0,
         }
     }
 }
@@ -479,6 +489,7 @@ mod tests {
             compact: true,
             close_to_tray: false,
             refresh_hz: Some(144),
+            zoom: 1.5,
         };
         let t = toml::to_string_pretty(&s).unwrap();
         let back: UiState = toml::from_str(&t).unwrap();
@@ -488,6 +499,25 @@ mod tests {
         assert!(back.compact);
         assert!(!back.close_to_tray);
         assert_eq!(back.refresh_hz, Some(144));
+        assert_eq!(back.zoom, 1.5);
+    }
+
+    /// P1-4. A zoom chosen once must survive a restart; that is the whole point
+    /// of persisting it rather than keeping it in memory.
+    #[test]
+    fn zoom_survives_a_round_trip() {
+        let s = UiState { zoom: 1.25, ..Default::default() };
+        let back: UiState = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.zoom, 1.25);
+    }
+
+    /// An old ui.toml written before zoom existed must load at 1.0 rather than
+    /// failing the whole file and losing the user's window size and theme.
+    #[test]
+    fn missing_zoom_defaults_to_one() {
+        let s: UiState = toml::from_str("theme = \"light\"\npage = \"system\"\n").unwrap();
+        assert_eq!(s.zoom, 1.0);
+        assert_eq!(s.page, Page::System, "the rest of the file must still load");
     }
 
     /// Every page needs a title, a subtitle and a glyph; a missing arm would be

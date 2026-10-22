@@ -71,7 +71,17 @@ impl Tray {
                     cmds.lock().push(TrayCommand::Show);
                 }
             } else if e.id == quit_for_cb {
-                cmds.lock().push(TrayCommand::Quit);
+                // Quit cannot be queued for the same reason Show could not: while
+                // the window is hidden no frame runs, so a queued Quit would never
+                // be drained and the menu item would do nothing. That is the one
+                // thing a tray menu must never do, because it leaves the user
+                // unable to stop a sampler that is still writing to the firmware.
+                //
+                // A visible window still goes through the queue, so `on_exit` runs
+                // and the UI state is saved. A hidden window exits here.
+                if !request_quit_direct() {
+                    cmds.lock().push(TrayCommand::Quit);
+                }
             }
         }));
 
@@ -134,17 +144,30 @@ impl TrayIconEventBridge {
 /// window carries. Caching an HWND is not an option: the tray is created before the
 /// first frame, so no handle exists yet at that point.
 pub fn show_window_direct() -> bool {
+    find_own_window().map(show_hwnd).unwrap_or(false)
+}
+
+/// Whether the app's own window is currently visible.
+pub fn window_is_visible() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    find_own_window()
+        .map(|hwnd| unsafe { IsWindowVisible(hwnd).as_bool() })
+        .unwrap_or(false)
+}
+
+/// The HWND of this process's `OmenMon` window, if it exists yet.
+///
+/// Public within the crate so the quit path and the UI agree on exactly one
+/// definition of "our window".
+pub fn find_own_window() -> Option<windows::Win32::Foundation::HWND> {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-        SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId,
     };
 
-    /// Carries both the target pid and an out-flag through `EnumWindows`'s single
-    /// `lparam`, because the callback has no other way to report a result.
     struct Ctx {
         pid: u32,
-        found: bool,
+        found: Option<HWND>,
     }
 
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -159,18 +182,13 @@ pub fn show_window_direct() -> bool {
         if len == 0 || String::from_utf16_lossy(&title[..len as usize]) != "OmenMon" {
             return BOOL(1);
         }
-        // SW_SHOW first: the window was hidden, not minimised, so SW_RESTORE alone
-        // can leave it hidden on some drivers.
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = ShowWindow(hwnd, SW_RESTORE);
-        let _ = SetForegroundWindow(hwnd);
-        ctx.found = IsWindowVisible(hwnd).as_bool();
+        ctx.found = Some(hwnd);
         BOOL(0)
     }
 
     let mut ctx = Ctx {
         pid: std::process::id(),
-        found: false,
+        found: None,
     };
     unsafe {
         let _ = EnumWindows(
@@ -179,6 +197,82 @@ pub fn show_window_direct() -> bool {
         );
     }
     ctx.found
+}
+
+fn show_hwnd(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+    unsafe {
+        // SW_SHOW first: the window was hidden, not minimised, so SW_RESTORE alone
+        // can leave it hidden on some drivers.
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
+        IsWindowVisible(hwnd).as_bool()
+    }
+}
+
+/// What the tray callback must do about a Quit request.
+///
+/// Extracted as a pure function because the interesting part is the decision, not
+/// the Win32 call: the bug was choosing the queue while no frame could drain it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitRoute {
+    /// Exit from the callback; the process is on its way out.
+    Direct,
+    /// Queue it; a live UI loop will drain it and run `on_exit`.
+    Queued,
+}
+
+/// Decide how to honour a Quit click given whether a frame can still run.
+///
+/// `window_visible` is the proxy for "the UI loop is alive": eframe stops
+/// delivering redraws to a hidden window, so a queued command would sit in the
+/// queue forever. That is exactly the P0-4 defect, and this is the line that
+/// makes it impossible to reintroduce.
+pub fn quit_route(window_visible: bool) -> QuitRoute {
+    if window_visible {
+        QuitRoute::Queued
+    } else {
+        QuitRoute::Direct
+    }
+}
+
+/// Exit the process from the tray callback, without waiting for a frame.
+///
+/// Returns `true` when the caller must not queue anything further: the process is
+/// already on its way out.
+///
+/// Two cases, deliberately distinguished:
+///
+/// * **Window hidden.** No frame will ever run, so the queued-command path is
+///   dead. The process exits here. This is the P0-4 defect.
+/// * **Window visible.** The UI loop is alive, so returning `false` lets the
+///   caller queue `Quit`; the frame drains it, `on_exit` saves UI state, and the
+///   shutdown is orderly.
+///
+/// The exit is `TerminateProcess` on our own handle rather than
+/// `PostQuitMessage`: the tray callback runs on a thread that does not own the
+/// message loop, and posting a quit to the wrong thread leaves the process alive.
+pub fn request_quit_direct() -> bool {
+    match quit_route(window_is_visible()) {
+        QuitRoute::Queued => false,
+        QuitRoute::Direct => {
+            exit_now();
+        }
+    }
+}
+
+/// Terminate this process immediately. Never returns.
+pub fn exit_now() -> ! {
+    use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    unsafe {
+        let _ = TerminateProcess(GetCurrentProcess(), 0);
+    }
+    // TerminateProcess on the current process should not return. If it somehow
+    // does, `process::exit` is the same outcome without unwinding.
+    std::process::exit(0)
 }
 
 
@@ -237,5 +331,21 @@ mod tests {
         // And the centre is background, so it is a ring not a disc.
         let centre = (8 * 16 + 8) * 4;
         assert!(px[centre] < 0x40, "centre should be graphite, got {:#04X}", px[centre]);
+    }
+
+    /// P0-4. With the window hidden no frame runs, so a queued Quit is never
+    /// drained and the menu item silently does nothing. The route must be direct
+    /// exactly when the loop is dead.
+    #[test]
+    fn hidden_window_quits_directly() {
+        assert_eq!(quit_route(false), QuitRoute::Direct);
+    }
+
+    /// A visible window still goes through the queue so `on_exit` can save UI
+    /// state and stop the sampler in order. Quitting directly there would skip
+    /// the state save, which is a different (quieter) bug.
+    #[test]
+    fn visible_window_quits_through_the_loop() {
+        assert_eq!(quit_route(true), QuitRoute::Queued);
     }
 }
