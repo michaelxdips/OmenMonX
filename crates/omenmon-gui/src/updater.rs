@@ -821,21 +821,40 @@ mod tests {
 
     // ---- install directory ------------------------------------------------
 
+    /// A scratch directory that really exists, so `pick_dir`'s `is_dir()` check is
+    /// exercised against reality rather than a hardcoded path.
+    ///
+    /// An earlier version of these tests used `C:\Users\Michael\...` and
+    /// `C:\Program Files\OmenMon` as literals. They passed on the author's machine
+    /// and failed in CI, where neither path exists — the test was asserting on the
+    /// developer's filesystem, not on the function. Found by the first CI run.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "omenmon-installdir-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("scratch dir");
+        d
+    }
+
     /// The running exe's own folder wins; Program Files is only a fallback that
     /// must exist and be writable. The old guess returned Program Files
     /// unconditionally when the exe lived elsewhere.
     #[test]
     fn install_dir_prefers_a_writable_running_folder() {
-        let exe_dir = PathBuf::from(r"C:\Users\Michael\Documents\Project\omenmon-rs\target\release");
-        let pf = PathBuf::from(r"C:\Program Files\OmenMon");
+        let exe_dir = scratch("exe");
+        let pf = scratch("pf");
         let picked = pick_dir(&[(exe_dir.clone(), true), (pf.clone(), true)]);
-        assert_eq!(picked, Some(exe_dir));
+        assert_eq!(picked, Some(exe_dir.clone()));
+        let _ = std::fs::remove_dir_all(&exe_dir);
+        let _ = std::fs::remove_dir_all(&pf);
     }
 
     #[test]
     fn install_dir_falls_back_only_to_a_usable_program_files() {
-        let exe_dir = PathBuf::from(r"C:\locked");
-        let pf = PathBuf::from(r"C:\Program Files\OmenMon");
+        let exe_dir = scratch("exe2");
+        let pf = scratch("pf2");
         // Exe folder unwritable, Program Files writable -> Program Files.
         assert_eq!(
             pick_dir(&[(exe_dir.clone(), false), (pf.clone(), true)]),
@@ -843,7 +862,9 @@ mod tests {
         );
         // Neither writable -> no target at all, so the caller refuses instead of
         // staging a copy that cannot work.
-        assert_eq!(pick_dir(&[(exe_dir, false), (pf, false)]), None);
+        assert_eq!(pick_dir(&[(exe_dir.clone(), false), (pf.clone(), false)]), None);
+        let _ = std::fs::remove_dir_all(&exe_dir);
+        let _ = std::fs::remove_dir_all(&pf);
     }
 
     /// `pick_dir` must also reject a candidate that does not exist, even when the
