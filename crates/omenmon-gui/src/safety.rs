@@ -79,14 +79,23 @@ pub fn path() -> PathBuf {
         .join("pending-cap.toml")
 }
 
-pub fn write(p: &Pending) {
+/// Record the marker atomically: write to a temp file and rename it over the
+/// real one, so a process killed mid-write cannot leave a torn file behind. A
+/// torn marker previously read as `None` and silently lost the recovery path.
+///
+/// The result is returned, never dropped: a marker that fails to write means a
+/// crash after it would leave the machine throttled with no way to know why,
+/// so callers must surface the failure.
+pub fn write(p: &Pending) -> std::io::Result<()> {
     let f = path();
     if let Some(dir) = f.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)?;
     }
-    if let Ok(t) = toml::to_string_pretty(p) {
-        let _ = std::fs::write(&f, t);
-    }
+    let t = toml::to_string_pretty(p)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = f.with_extension("toml.tmp");
+    std::fs::write(&tmp, t)?;
+    std::fs::rename(&tmp, &f)
 }
 
 pub fn clear() {

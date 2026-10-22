@@ -11,7 +11,7 @@ use crate::sampler::SharedState;
 /// Plain text on purpose: a bug report is pasted into a chat window, so nothing
 /// here may depend on a renderer. Every value is the raw readback or the parsed
 /// value next to its source, never a rounded display string.
-pub fn build(st: &SharedState, tray_error: Option<&str>, zoom: f32, theme: &str) -> String {
+pub fn build(st: &SharedState, tray_error: Option<&str>, zoom: f32) -> String {
     let mut s = String::new();
     s.push_str(&format!("OmenMon-rs {}\n", env!("CARGO_PKG_VERSION")));
     s.push_str(&format!("build: {}\n", crate::build_hash()));
@@ -69,7 +69,7 @@ pub fn build(st: &SharedState, tray_error: Option<&str>, zoom: f32, theme: &str)
     if let Some(e) = tray_error {
         s.push_str(&format!("tray: {e}\n"));
     }
-    s.push_str(&format!("ui: {theme} zoom {zoom}\n"));
+    s.push_str(&format!("ui: Dark zoom {zoom}\n"));
     s
 }
 
@@ -82,7 +82,7 @@ mod tests {
     #[test]
     fn diag_always_names_build_and_elevation() {
         let st = SharedState::default();
-        let text = build(&st, None, 1.0, "Dark");
+        let text = build(&st, None, 1.0);
         assert!(text.contains("OmenMon-rs "), "version line is mandatory");
         assert!(text.contains("build: "), "commit line is mandatory");
         assert!(text.contains("elevated: "), "elevation decides what can work");
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn unreadable_blocks_are_stated_not_omitted() {
         let st = SharedState::default();
-        let text = build(&st, None, 1.0, "Dark");
+        let text = build(&st, None, 1.0);
         assert!(text.contains("limits block 0x2A: unreadable"));
         assert!(!text.contains("limits block 0x2A: PL1"), "no invented numbers");
     }
@@ -102,9 +102,9 @@ mod tests {
     #[test]
     fn diag_includes_ui_state_and_tray_failure() {
         let st = SharedState::default();
-        let text = build(&st, Some("no shell"), 1.25, "Light");
+        let text = build(&st, Some("no shell"), 1.25);
         assert!(text.contains("tray: no shell"));
         assert!(text.contains("zoom 1.25"));
-        assert!(text.contains("Light"));
+        assert!(text.contains("Dark"));
     }
 }

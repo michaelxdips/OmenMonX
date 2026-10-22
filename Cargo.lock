@@ -1377,11 +1377,8 @@ version = "0.3.0"
 dependencies = [
  "hp-ec",
  "hp-wmi",
- "parking_lot",
  "serde",
- "thiserror 2.0.21",
  "toml",
- "tracing",
  "windows 0.58.0",
  "wmi",
 ]
@@ -1390,9 +1387,7 @@ dependencies = [
 name = "hp-ec"
 version = "0.3.0"
 dependencies = [
- "parking_lot",
  "thiserror 2.0.21",
- "tracing",
  "windows 0.58.0",
 ]
 
@@ -1401,9 +1396,7 @@ name = "hp-wmi"
 version = "0.3.0"
 dependencies = [
  "thiserror 2.0.21",
- "tracing",
  "windows 0.58.0",
- "windows-core 0.58.0",
  "wmi",
 ]
 
@@ -2145,7 +2138,6 @@ dependencies = [
  "hp-wmi",
  "parking_lot",
  "serde",
- "serde_json",
  "sha2",
  "toml",
  "tracing",

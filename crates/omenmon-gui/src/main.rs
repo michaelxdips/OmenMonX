@@ -22,6 +22,7 @@ mod widgets;
 
 use eframe::egui;
 use sampler::{ControlRequest, Sampler};
+use std::sync::Arc;
 use theme::{Palette, UiState};
 use updater::UpdateHandle;
 
@@ -108,7 +109,22 @@ impl App {
         let crashed = crash::take_previous_crash();
 
         let mut app = Self {
-            sampler: Sampler::spawn(1000, elevated),
+            sampler: match Sampler::try_spawn(1000, elevated) {
+                Ok(s) => s,
+                Err(e) => {
+                    // A failed sampler thread must not take the process down:
+                    // without it the UI shows nothing, but the app still runs
+                    // and the tray still works. Degrade to a state the UI can
+                    // describe instead of panicking before the first frame.
+                    tracing::error!("sampler thread failed to start: {e}");
+                    let state = Arc::new(parking_lot::Mutex::new(sampler::SharedState {
+                        elevated,
+                        last_error: Some(format!("sampler unavailable: {e}")),
+                        ..Default::default()
+                    }));
+                    Sampler::from_parts(state)
+                }
+            },
             updates: UpdateHandle::default(),
             install_dir: updater::resolve_install_target().dir.display().to_string(),
             ui,

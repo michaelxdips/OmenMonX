@@ -163,6 +163,9 @@ pub struct SharedState {
     pub fan_count: Option<u8>,
     /// Live clock, MHz. Sampled cheaply so the cap's effect is visible.
     pub clock_mhz: f32,
+    /// Latched clock-sampling failure. Once typeperf fails, it is not retried;
+    /// the UI shows this instead of silently decaying to 0 MHz.
+    pub clock_error: Option<String>,
     /// Result of the most recent control write, for the UI to show verbatim.
     pub last_write: Option<WriteReport>,
     /// A write is in flight; the UI shows a pending state.
@@ -222,8 +225,26 @@ impl History {
     }
 }
 
+/// True when a battery reading has no meaningful data at all — the shape
+/// `read_battery` returns when its COM init fails. Such a reading is a
+/// sampling failure, not a report that the battery is empty.
+fn battery_is_empty(b: &battery::BatteryInfo) -> bool {
+    b.full_charge_mwh.is_none()
+        && b.design_mwh.is_none()
+        && b.health_pct.is_none()
+        && b.charge_pct.is_none()
+        && b.cycles.is_none()
+        && b.voltage_mv.is_none()
+        && b.rate_mw.is_none()
+        && !b.ac_online
+        && !b.charging
+        && b.temp_c.is_none()
+}
+
 impl Sampler {
-    pub fn spawn(poll_ms: u64, elevated: bool) -> Self {
+    /// Like [`spawn`], but returns `Err` instead of panicking when the thread
+    /// cannot be created, so the caller can degrade gracefully.
+    pub fn try_spawn(poll_ms: u64, elevated: bool) -> std::io::Result<Self> {
         let state = Arc::new(Mutex::new(SharedState {
             elevated,
             ..Default::default()
@@ -239,15 +260,58 @@ impl Sampler {
             std::thread::Builder::new()
                 .name("sampler".into())
                 .spawn(move || {
-                    let cfg = hp_core::Config::load();
-                    let bios = hp_wmi::Bios::connect().ok();
-                    let io = hp_ec::ecio::EcIo::connect().ok();
-                    let engine = hp_core::engine::Engine::new(cfg);
-                    let mut tick: u64 = 0;
+                    sampler_loop(poll_ms, state, history, request, stop);
+                })?;
+        }
+        Ok(Self { state, history, request, stop })
+    }
+
+    /// Build a dead sampler around pre-made state — used when the thread could
+    /// not be started and the UI must still render a described failure.
+    pub fn from_parts(state: Arc<Mutex<SharedState>>) -> Self {
+        Self {
+            state,
+            history: Arc::new(Mutex::new(History::new(240))),
+            request: Arc::new(Mutex::new(None)),
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[allow(dead_code)] // convenience constructor kept for tests/tools
+    pub fn spawn(poll_ms: u64, elevated: bool) -> Self {
+        Self::try_spawn(poll_ms, elevated).expect("spawn sampler")
+    }
+}
+
+/// The sampler thread body: telemetry, control writes, and publishing.
+fn sampler_loop(
+    poll_ms: u64,
+    state: Arc<Mutex<SharedState>>,
+    history: Arc<Mutex<History>>,
+    request: Arc<Mutex<Option<ControlRequest>>>,
+    stop: Arc<AtomicBool>,
+) {
+    {
+        let cfg = hp_core::Config::load();
+        let bios = hp_wmi::Bios::connect().ok();
+        let io = hp_ec::ecio::EcIo::connect().ok();
+        let engine = hp_core::engine::Engine::new(cfg);
+        let mut tick: u64 = 0;
                     // The pristine RGB table is captured once, on the first
                     // successful read, and never overwritten: it is the only
-                    // byte-exact restore source.
+                    // byte-exact restore source. It is only meaningful while
+                    // no RGB write has run this session — after one, the
+                    // "pristine" read is already our own output.
                     let mut pristine_rgb: Option<Vec<u8>> = None;
+                    let mut rgb_touched: bool = false;
+                    // Live clock. Kept locally and published, so a failed
+                    // sample keeps the last good value.
+                    let mut clock_mhz: f32 = 0.0;
+                    // Latched clock-sampling failure: typeperf is re-spawned
+                    // every tick, so one broken counter must not turn into a
+                    // process a second. Latched once, reported forever, and
+                    // the display keeps the last good MHz.
+                    let mut clock_error: Option<String> = None;
 
                     // Tick cadence is expressed as `% N` rather than
                     // `is_multiple_of`: the counters are a schedule, and the
@@ -259,7 +323,8 @@ impl Sampler {
                         if let Some(r) = req {
                             if let Some(b) = &bios {
                                 state.lock().write_pending = true;
-                                let report = apply_control(b, r, &mut pristine_rgb);
+                                let report =
+                                    apply_control(b, r, &mut pristine_rgb, &mut rgb_touched, &stop);
                                 let mut st = state.lock();
                                 st.write_pending = false;
                                 st.last_write = Some(report);
@@ -275,49 +340,89 @@ impl Sampler {
                             }
                         }
 
-                        let mut st = state.lock();
+                        // ---- device I/O happens OUTSIDE the state lock ----
+                        // A WMI round trip is tens of milliseconds and some
+                        // calls sleep; holding `state` across them freezes
+                        // every UI reader for the duration.
                         match &bios {
                             Some(b) => {
                                 let s = engine.poll(b, io.as_ref());
-                                st.sample = Some(s.sample);
-                                st.target_fan_pct = s.target_fan_pct;
-                                st.bios_ok = true;
-                                st.ec_ok = io.is_some();
-                                st.last_error = None;
                                 history.lock().push(s.sample.cpu, s.sample.gpu);
 
                                 // Control state. Read on a slower cadence than the
                                 // thermal sample: these change rarely and each is a
                                 // separate WMI round trip.
+                                let mut limits = None;
+                                let mut thermal_status = None;
                                 if tick % 2 == 0 {
-                                    st.limits = b.get_cpu_power().ok();
-                                    st.thermal_status = b.get_thermal_status().unwrap_or(0);
+                                    limits = b.get_cpu_power().ok();
+                                    thermal_status = Some(b.get_thermal_status().unwrap_or(0));
                                 }
+                                let mut fan_table = None;
+                                let mut fan_count = None;
                                 if tick % 20 == 0 {
-                                    st.fan_table = b.get_fan_table_parsed().ok();
-                                    st.fan_count = b.get_fan_count().ok();
+                                    fan_table = b.get_fan_table_parsed().ok();
+                                    fan_count = b.get_fan_count().ok();
                                 }
-                                if tick % 2 == 1 {
-                                    st.clock_mhz = read_clock_mhz().unwrap_or(0.0);
+                                if tick % 2 == 1 && clock_error.is_none() {
+                                    match read_clock_mhz() {
+                                        Some(v) => clock_mhz = v,
+                                        None => {
+                                            clock_error = Some(
+                                                "clock sampling failed (typeperf); \
+                                                 keeping the last reading"
+                                                    .into(),
+                                            );
+                                        }
+                                    }
                                 }
                                 // RGB: slow cadence, and only when nothing else is
                                 // queued. 128-byte reads are the most expensive
                                 // call on this channel.
+                                let mut rgb_read: Option<RgbState> = None;
                                 if tick % 10 == 3 {
                                     if let Ok(r) = b.get_color_table() {
                                         if r.data.len() >= 0x2A {
                                             let mut rgb = RgbState::parse(&r.data);
-                                            if pristine_rgb.is_none() {
+                                            if pristine_rgb.is_none() && !rgb_touched {
                                                 pristine_rgb = Some(r.data.clone());
                                             }
                                             rgb.pristine = pristine_rgb.clone();
                                             rgb.backlight = b.get_backlight().ok();
-                                            st.rgb = Some(rgb);
+                                            rgb_read = Some(rgb);
                                         }
                                     }
                                 }
+
+                                // ---- one brief lock to publish everything ----
+                                let mut st = state.lock();
+                                st.sample = Some(s.sample);
+                                st.target_fan_pct = s.target_fan_pct;
+                                st.bios_ok = true;
+                                st.ec_ok = io.is_some();
+                                st.last_error = None;
+                                if let Some(l) = limits {
+                                    st.limits = Some(l);
+                                }
+                                if let Some(t) = thermal_status {
+                                    st.thermal_status = t;
+                                }
+                                if let Some(f) = fan_table {
+                                    st.fan_table = Some(f);
+                                }
+                                if let Some(f) = fan_count {
+                                    st.fan_count = Some(f);
+                                }
+                                st.clock_mhz = clock_mhz;
+                                st.clock_error = clock_error.clone();
+                                st.rgb = rgb_read;
+                                // A request queued while a long apply_control is
+                                // still running (or since this tick started) must
+                                // keep the UI in its pending state.
+                                st.write_pending = st.write_pending || request.lock().is_some();
                             }
                             None => {
+                                let mut st = state.lock();
                                 st.bios_ok = false;
                                 st.last_error = Some(
                                     "WMI BIOS interface unavailable — run elevated for telemetry and control"
@@ -326,31 +431,80 @@ impl Sampler {
                             }
                         }
                         if tick % 10 == 0 {
-                            st.battery = Some(battery::read_battery());
+                            let b = battery::read_battery();
+                            // An all-empty reading means the COM init failed, not
+                            // that the battery vanished; keep the last real one.
+                            let mut st = state.lock();
+                            if st.battery.is_none() || !battery_is_empty(&b) {
+                                st.battery = Some(b);
+                            }
                         }
-                        drop(st);
                         tick += 1;
                         std::thread::sleep(Duration::from_millis(poll_ms.max(250)));
                     }
-                })
-                .expect("spawn sampler");
-        }
-        Self { state, history, request, stop }
     }
+}
 
+impl Sampler {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
 
     /// Queue a write. Last request wins: a slider drag produces many, and only
     /// the final position is a real intention.
+    ///
+    /// Overwriting a *different* channel's request is not silent: the displaced
+    /// request gets a `Dropped` report so the UI shows that it was superseded
+    /// rather than vanishing. Two requests on the same channel (two cap writes,
+    /// say) overwrite quietly — the older one is genuinely obsolete.
     pub fn send(&self, req: ControlRequest) {
-        *self.request.lock() = Some(req);
+        let mut q = self.request.lock();
+        if let Some(prev) = q.take() {
+            if channel(&prev) != channel(&req) {
+                let mut st = self.state.lock();
+                st.last_write = Some(WriteReport {
+                    message: format!("{} — superseded by a newer request", describe(&prev)),
+                    outcome: WriteOutcome::Failed,
+                    at: Instant::now(),
+                    held_watts: None,
+                });
+            }
+        }
+        *q = Some(req);
     }
 }
 
-fn ok(msg: impl Into<String>) -> WriteReport {
-    WriteReport {
+/// Which control channel a request belongs to. Requests on the same channel
+/// supersede each other silently; different channels are reported when dropped.
+fn channel(r: &ControlRequest) -> u8 {
+    match r {
+        ControlRequest::SetPowerCap(_) | ControlRequest::RestoreDefault => 0,
+        ControlRequest::SetThermal(_) => 1,
+        ControlRequest::SetMaxFan(_) | ControlRequest::ReleaseMaxFan => 2,
+        ControlRequest::SetZone { .. } | ControlRequest::RestoreRgb => 3,
+        ControlRequest::SetBacklight(_) => 4,
+        ControlRequest::SetBios { .. } => 5,
+    }
+}
+
+/// Short human description of a request, for a "superseded" report.
+fn describe(r: &ControlRequest) -> String {
+    match r {
+        ControlRequest::SetPowerCap(w) => format!("cap {w} W"),
+        ControlRequest::RestoreDefault => "restore stock limits".into(),
+        ControlRequest::SetThermal(m) => format!("thermal profile {m:?}"),
+        ControlRequest::SetMaxFan(on) => format!("max fan {}", if *on { "on" } else { "off" }),
+        ControlRequest::ReleaseMaxFan => "hand fans back to firmware".into(),
+        ControlRequest::SetZone { zone, rgb } => {
+            format!("zone {zone} -> #{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
+        }
+        ControlRequest::RestoreRgb => "restore colour table".into(),
+        ControlRequest::SetBacklight(v) => format!("backlight {v:#04X}"),
+        ControlRequest::SetBios { name, value } => format!("{name} <- {value:?}"),
+    }
+}
+
+fn ok(msg: impl Into<String>) -> WriteReport {    WriteReport {
         message: msg.into(),
         outcome: WriteOutcome::Verified,
         at: Instant::now(),
@@ -381,7 +535,17 @@ fn apply_control(
     b: &hp_wmi::Bios,
     req: ControlRequest,
     pristine_rgb: &mut Option<Vec<u8>>,
+    rgb_touched: &mut bool,
+    stop: &AtomicBool,
 ) -> WriteReport {
+    // Any executed RGB write makes the current table ours; a later read is no
+    // longer a pristine snapshot.
+    if matches!(
+        req,
+        ControlRequest::SetZone { .. } | ControlRequest::RestoreRgb
+    ) {
+        *rgb_touched = true;
+    }
     // A write that has a config representation must persist it, or the GUI and
     // the CLI disagree about what the machine is set to and the logon task
     // re-applies a stale value. Persistence is keyed on the *verified* outcome,
@@ -390,7 +554,7 @@ fn apply_control(
         ControlRequest::SetPowerCap(w) => set_cap(b, *w),
         ControlRequest::RestoreDefault => restore_stock(b),
         ControlRequest::SetThermal(m) => set_thermal(b, *m),
-        ControlRequest::SetMaxFan(on) => set_max_fan(b, *on),
+        ControlRequest::SetMaxFan(on) => set_max_fan(b, *on, stop),
         ControlRequest::ReleaseMaxFan => release_max_fan(b),
         ControlRequest::SetZone { zone, rgb } => set_zone(b, *zone, *rgb),
         ControlRequest::RestoreRgb => restore_rgb(b, pristine_rgb),
@@ -418,11 +582,18 @@ fn persist(req: &ControlRequest, report: &WriteReport) -> Option<String> {
     }
     let mut cfg = hp_core::Config::load();
     match req {
-        ControlRequest::SetPowerCap(w) => {
-            // Save what the firmware actually held, not what was asked for: a
-            // request clamped from 65 W to 25 W on USB-C must not be replayed as
-            // 65 W at the next login.
-            let held = report.held_watts.unwrap_or(*w);
+        ControlRequest::SetPowerCap(_) => {
+            // Only a *verified* readback may be persisted. `held_watts: None`
+            // means the readback failed, and the firmware's actual state is
+            // unknown: recording the requested value would replay a number
+            // the machine may not hold at the next login. Nothing is saved
+            // instead, and the previous preference stays in place.
+            let Some(held) = report.held_watts else {
+                return Some(
+                    " · readback failed — nothing saved; the previous saved cap stands"
+                        .to_string(),
+                );
+            };
             Some(match cfg.record_power_cap(Some(held)) {
                 Ok(()) => format!(" · saved {held} W for next login"),
                 Err(e) => format!(" · WARNING: could not save the cap: {e}"),
@@ -456,16 +627,20 @@ fn persist(req: &ControlRequest, report: &WriteReport) -> Option<String> {
 /// Verification is against 0x2D, which is a live read. It is **not** against the
 /// EC tachometer at 0xC4: that register reads a frozen 1249 rpm on this board, so
 /// a check based on it would report success or failure at random.
-fn set_max_fan(b: &hp_wmi::Bios, on: bool) -> WriteReport {
+fn set_max_fan(b: &hp_wmi::Bios, on: bool, stop: &AtomicBool) -> WriteReport {
     let before = b.fan_levels().map(|(a, _)| a).unwrap_or(0);
     if let Err(e) = b.set_max_fan(on) {
         return failed(format!("max fan failed: {e}"));
     }
     // The fans take several seconds to spool. Sampling too early reads the old
-    // level and would report a working control as broken.
+    // level and would report a working control as broken. The stop flag is
+    // checked every round so shutdown is not held up for the full 7 seconds.
     let mut peak = before;
     for _ in 0..8 {
         std::thread::sleep(Duration::from_millis(900));
+        if stop.load(Ordering::Relaxed) {
+            return failed("max fan applied but verification was cut short by shutdown");
+        }
         if let Ok((a, _)) = b.fan_levels() {
             peak = peak.max(a);
         }
@@ -530,17 +705,33 @@ fn set_thermal(b: &hp_wmi::Bios, m: hp_wmi::ThermalMode) -> WriteReport {
 
 fn restore_rgb(b: &hp_wmi::Bios, pristine_rgb: &Option<Vec<u8>>) -> WriteReport {
     match pristine_rgb.clone() {
-        Some(t) => match b.set_color_table(&t) {
-            Ok(()) => {
-                std::thread::sleep(Duration::from_millis(250));
-                match b.get_color_table() {
-                    Ok(r) if r.data == t => ok("colour table restored byte-for-byte (verified)"),
-                    Ok(_) => failed("restore written but readback differs"),
-                    Err(e) => failed(format!("restore written, readback failed: {e}")),
+        Some(t) => {
+            // The rollback is the only copy of the original table: one failed
+            // write is retried before admitting the table may be left partial.
+            let mut last_err = None;
+            let mut wrote = false;
+            for _ in 0..2 {
+                match b.set_color_table(&t) {
+                    Ok(()) => {
+                        wrote = true;
+                        break;
+                    }
+                    Err(e) => last_err = Some(e),
                 }
             }
-            Err(e) => failed(format!("restore failed: {e}")),
-        },
+            if !wrote {
+                let e = last_err.expect("at least one attempt was made");
+                return failed(format!(
+                    "restore FAILED after a retry — the colour table may be partial: {e}"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            match b.get_color_table() {
+                Ok(r) if r.data == t => ok("colour table restored byte-for-byte (verified)"),
+                Ok(_) => failed("restore written but readback differs"),
+                Err(e) => failed(format!("restore written, readback failed: {e}")),
+            }
+        }
         None => failed("no original colour table captured yet"),
     }
 }
@@ -569,11 +760,28 @@ fn set_backlight(b: &hp_wmi::Bios, v: u8) -> WriteReport {
 /// not write a number of its own.
 fn restore_stock(b: &hp_wmi::Bios) -> WriteReport {
     let before = b.get_cpu_power().ok();
-    crate::safety::write(&crate::safety::Pending::now(0, crate::safety::Phase::Restoring));
+    // A marker write failure here is only advisory (a restore in progress), but
+    // it must not be silent: without the marker a crash mid-restore loses the
+    // recovery banner.
+    let marker_warn = match crate::safety::write(&crate::safety::Pending::now(
+        0,
+        crate::safety::Phase::Restoring,
+    )) {
+        Ok(()) => None,
+        Err(e) => Some(format!(" WARNING: crash-recovery marker failed: {e}")),
+    };
     if let Err(e) = b.reset_power_limits() {
         crate::safety::clear();
-        return failed(format!("restore failed: {e}"));
+        let mut r = failed(format!("restore failed: {e}"));
+        if let Some(w) = marker_warn {
+            r.message.push_str(&w);
+        }
+        return r;
     }
+    // Try the readback twice before giving up: the first read can catch the
+    // firmware mid-transition. But the reset *was* sent either way, so the
+    // marker is always cleared — leaving `Restoring` stranded would pin the
+    // recovery banner until the next restart for no recoverable fault.
     std::thread::sleep(std::time::Duration::from_millis(800));
     match b.get_cpu_power() {
         Ok(l) => {
@@ -587,17 +795,45 @@ fn restore_stock(b: &hp_wmi::Bios) -> WriteReport {
             } else {
                 format!("already at the firmware stock block (PL1={} W)", l.pl1)
             };
-            ok(msg)
+            let mut r = ok(msg);
+            if let Some(w) = marker_warn {
+                r.message.push_str(&w);
+            }
+            r
         }
-        Err(e) => failed(format!("reset sent, readback failed: {e}")),
+        Err(_first) => {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            match b.get_cpu_power() {
+                Ok(l) => {
+                    crate::safety::clear();
+                    ok(format!(
+                        "reset sent; settled readback: PL1={} PL2={} PL4={} W",
+                        l.pl1, l.pl2, l.pl4
+                    ))
+                }
+                Err(e) => {
+                    crate::safety::clear();
+                    failed(format!("reset sent; readback failed: {e}"))
+                }
+            }
+        }
     }
 }
 
 /// Write the cap and verify by readback. Records the crash marker around it.
 fn set_cap(b: &hp_wmi::Bios, w: u8) -> WriteReport {
     // Intent first: if this process dies between here and `Settled`, the next
-    // start knows a cap may still be live.
-    crate::safety::write(&crate::safety::Pending::now(w, crate::safety::Phase::Written));
+    // start knows a cap may still be live. A marker write failure is folded
+    // into the report — a crash without the marker leaves the cap applied with
+    // no recovery path, so the user must be told.
+    if let Err(e) = crate::safety::write(&crate::safety::Pending::now(
+        w,
+        crate::safety::Phase::Written,
+    )) {
+        return failed(format!(
+            "cap not attempted: crash-recovery marker could not be written: {e}"
+        ));
+    }
 
     let applied = match b.set_power_limit(w) {
         Ok(v) => v,
@@ -610,7 +846,7 @@ fn set_cap(b: &hp_wmi::Bios, w: u8) -> WriteReport {
     match b.get_cpu_power() {
         Ok(l) => {
             if l.pl1 == applied {
-                crate::safety::write(&crate::safety::Pending::settled(w, applied));
+                let _ = crate::safety::write(&crate::safety::Pending::settled(w, applied));
                 let mut r = if applied == w {
                     ok(format!("cap set to {applied} W (verified)"))
                 } else {
@@ -620,7 +856,7 @@ fn set_cap(b: &hp_wmi::Bios, w: u8) -> WriteReport {
                 r.held_watts = Some(l.pl1);
                 r
             } else {
-                crate::safety::write(
+                let _ = crate::safety::write(
                     &crate::safety::Pending::now(w, crate::safety::Phase::Written)
                         .with_observed(l.pl1),
                 );
@@ -628,7 +864,7 @@ fn set_cap(b: &hp_wmi::Bios, w: u8) -> WriteReport {
             }
         }
         Err(e) => {
-            crate::safety::write(
+            let _ = crate::safety::write(
                 &crate::safety::Pending::now(w, crate::safety::Phase::Written),
             );
             adjusted(format!("cap {applied} W written, readback failed: {e}"))
@@ -657,9 +893,21 @@ fn set_zone(b: &hp_wmi::Bios, zone: u8, rgb: [u8; 3]) -> WriteReport {
                     rgb[0], rgb[1], rgb[2]
                 ))
             } else {
-                // Put the original back rather than leaving a half-applied table.
-                let _ = b.set_color_table(&orig);
-                failed("colour write not verified — original table restored")
+                // Put the original back rather than leaving a half-applied
+                // table. The rollback is the only copy, so a failed write is
+                // retried once before admitting the table may be partial.
+                let mut rolled_back = false;
+                for _ in 0..2 {
+                    if b.set_color_table(&orig).is_ok() {
+                        rolled_back = true;
+                        break;
+                    }
+                }
+                if rolled_back {
+                    failed("colour write not verified — original table restored")
+                } else {
+                    failed("colour write not verified — restore FAILED, table may be partial")
+                }
             }
         }
         Err(e) => failed(format!("colour written, readback failed: {e}")),

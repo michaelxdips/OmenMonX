@@ -49,11 +49,15 @@ pub fn install_panic_hook() {
 fn write_crash(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
-    let ts = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let log = dir.join(format!("crash-{ts}.log"));
+        .unwrap_or_default();
+    let ts = now.as_secs();
+    let millis = now.subsec_millis();
+    // pid and millis keep two panics in the same second from clobbering each
+    // other's log — two panics in one second do happen, from a panic inside a
+    // worker thread racing the main thread's abort path.
+    let log = dir.join(format!("crash-{ts}-{millis}-{}.log", std::process::id()));
 
     let payload = info
         .payload()
@@ -91,9 +95,15 @@ fn write_crash(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
     );
     std::fs::write(&log, body)?;
     // The marker is what the next launch reads; it points at the full log.
+    // The pid is recorded so a next-launch report can tell two racing
+    // processes' crashes apart.
     std::fs::write(
         marker_path(),
-        format!("{ts}\n{location}\n{payload}\n{}\n", log.display()),
+        format!(
+            "{ts}\n{location}\n{payload}\n{}\npid={}\n",
+            log.display(),
+            std::process::id()
+        ),
     )?;
     Ok(())
 }

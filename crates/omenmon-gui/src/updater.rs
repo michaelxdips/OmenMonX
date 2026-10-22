@@ -27,6 +27,19 @@ use std::sync::Arc;
 const LATEST_API: &str = "https://api.github.com/repos/michaelxdips/OmenMonX/releases/latest";
 const UA: &str = concat!("OmenMon-rs/", env!("CARGO_PKG_VERSION"));
 
+/// Network timeouts. Without them a stalled connection leaves `busy` set
+/// forever and the UI shows an eternal spinner.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const OVERALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(CONNECT_TIMEOUT)
+        .timeout(OVERALL_TIMEOUT)
+        .user_agent(UA)
+        .build()
+}
+
 /// The installer's silent switch. `omenmon-setup.exe` accepts it as an alias for
 /// the default `install` action, so the updater can run it without a console.
 const INSTALLER_ARG: &str = "install";
@@ -38,16 +51,34 @@ pub fn current_version() -> String {
 // ---------------------------------------------------------------- version --
 
 /// Dot-separated semver-ish compare. True if `latest` > `current`.
+///
+/// Pre-release and build metadata (`-`/`+` suffixes) are not comparable this
+/// way, and a pre-release must never be offered as newer than a stable build,
+/// so any tag carrying either is rejected outright. Empty components (as in
+/// `1..2`) are malformed and also rejected rather than silently dropped, which
+/// would make `1..2` compare equal to `1.2`.
 pub fn is_newer(latest: &str, current: &str) -> bool {
-    let parse = |v: &str| -> Vec<u64> {
+    let parse = |v: &str| -> Option<Vec<u64>> {
+        if v.contains('-') || v.contains('+') {
+            return None; // pre-release or build metadata: not a stable update
+        }
         v.trim_start_matches('v')
             .split('.')
-            .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse().ok())
-            .collect()
+            .map(|p| {
+                let digits: String =
+                    p.chars().take_while(|c| c.is_ascii_digit()).collect();
+                // A component that is empty or contains non-digit trailing
+                // junk is malformed, not zero.
+                if digits.is_empty() || digits.len() != p.len() {
+                    return None;
+                }
+                digits.parse().ok()
+            })
+            .collect::<Option<Vec<_>>>()
     };
-    let (a, b) = (parse(latest), parse(current));
+    let (Some(a), Some(b)) = (parse(latest), parse(current)) else {
+        return false;
+    };
     for i in 0..a.len().max(b.len()) {
         let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
         if x != y {
@@ -172,11 +203,7 @@ impl std::fmt::Display for CheckError {
 }
 
 pub fn check() -> Result<UpdateCheck, CheckError> {
-    let resp = ureq::AgentBuilder::new()
-        .user_agent(UA)
-        .build()
-        .get(LATEST_API)
-        .call();
+    let resp = agent().get(LATEST_API).call();
 
     let rel: GhRelease = match resp {
         Ok(r) => r
@@ -365,18 +392,38 @@ pub fn download(
     let dest = dir.join(name);
     let tmp = dir.join(format!("{name}.part"));
 
-    let resp = ureq::AgentBuilder::new()
-        .user_agent(UA)
-        .build()
-        .get(url)
-        .call()
-        .context("download request failed")?;
+    // Any error path must leave no `.part` behind: the next attempt would find
+    // a stale partial file indistinguishable from a fresh one.
+    match download_inner(&tmp, url, expected, digest, progress) {
+        Ok(()) => {}
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
+    match std::fs::rename(&tmp, &dest) {
+        Ok(()) => Ok(dest),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(anyhow::Error::new(e).context("promote verified payload to final name"))
+        }
+    }
+}
+
+fn download_inner(
+    tmp: &Path,
+    url: &str,
+    expected: u64,
+    digest: &str,
+    progress: &dyn Fn(u64, u64),
+) -> anyhow::Result<()> {
+    let resp = agent().get(url).call().context("download request failed")?;
     let total = resp
         .header("Content-Length")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(expected);
     let mut reader = resp.into_reader();
-    let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+    let mut out = std::io::BufWriter::new(std::fs::File::create(tmp)?);
     let mut buf = [0u8; 64 * 1024];
     let mut written: u64 = 0;
     loop {
@@ -393,21 +440,14 @@ pub fn download(
     out.flush()?;
 
     if total > 0 && written != total {
-        let _ = std::fs::remove_file(&tmp);
         bail!("download truncated: got {written} of {total} bytes");
     }
     // Size from the release metadata is a cheap second opinion, but the digest
     // is the authoritative check.
     if expected > 0 && written != expected {
-        let _ = std::fs::remove_file(&tmp);
         bail!("download size {written} does not match release metadata {expected}");
     }
-    if let Err(e) = verify(&tmp, digest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    std::fs::rename(&tmp, &dest)?;
-    Ok(dest)
+    verify(tmp, digest)
 }
 
 // ---------------------------------------------------------------- helper ---
@@ -438,7 +478,7 @@ pub fn helper_script(
     s.push_str(&format!(
         "tasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul\r\n"
     ));
-    s.push_str("if not errorlevel 1 (\r\n  timeout /T 1 /NUL >nul\r\n  goto wait\r\n)\r\n");
+    s.push_str("if not errorlevel 1 (\r\n  timeout /T 1 /NOBREAK >nul\r\n  goto wait\r\n)\r\n");
 
     match action {
         InstallAction::RunInstaller => {
@@ -464,11 +504,14 @@ pub fn helper_script(
             s.push_str("if errorlevel 1 (\r\n");
             s.push_str("  echo result=failed> \"%RESULT%\"\r\n");
             s.push_str("  echo step=copy>> \"%RESULT%\"\r\n");
-            s.push_str(&format!("  echo dest={}>> \"%RESULT%\"\r\n", dest.display()));
+            // The destination is quoted: `C:\Program Files (x86)` contains a
+            // `)`, which unquoted would terminate the if-block and flip a
+            // failed copy into a reported success.
+            s.push_str(&format!("  echo dest=\"{}\">> \"%RESULT%\"\r\n", dest.display()));
             s.push_str("  exit /b 1\r\n)\r\n");
             s.push_str("echo result=ok> \"%RESULT%\"\r\n");
             s.push_str("echo step=copy>> \"%RESULT%\"\r\n");
-            s.push_str(&format!("  echo dest={}>> \"%RESULT%\"\r\n", dest.display()));
+            s.push_str(&format!("echo dest=\"{}\">> \"%RESULT%\"\r\n", dest.display()));
             if let Some(r) = relaunch {
                 s.push_str(&format!("start \"\" \"{}\"\r\n", r.display()));
             }
@@ -518,21 +561,27 @@ pub struct InstallResult {
 pub fn read_last_result() -> Option<InstallResult> {
     let text = std::fs::read_to_string(result_file()).ok()?;
     let mut ok = None;
-    let mut step = String::new();
+    let mut step: Option<String> = None;
     let mut dest = None;
     for line in text.lines() {
         let line = line.trim();
         if let Some(v) = line.strip_prefix("result=") {
             ok = Some(v == "ok");
         } else if let Some(v) = line.strip_prefix("step=") {
-            step = v.to_string();
+            // An empty step means the file exists but the verdict lines have
+            // not been written yet — the helper's `echo` lines land one by
+            // one. Reading that as a verdict reports a half-finished install
+            // as a finished one, so it is treated as "no verdict yet".
+            if !v.is_empty() {
+                step = Some(v.to_string());
+            }
         } else if let Some(v) = line.strip_prefix("dest=") {
-            dest = Some(v.to_string());
+            dest = Some(v.trim_matches('"').to_string());
         }
     }
     Some(InstallResult {
         ok: ok?,
-        step,
+        step: step?,
         dest,
     })
 }
@@ -592,14 +641,22 @@ impl UpdateHandle {
 
     /// Spawn a background download, verify, and staged install.
     pub fn update_async(&self) {
-        let h = self.clone();
-        std::thread::spawn(move || {
-            let mut s = h.0.lock();
+        // Re-entrancy guard, taken *before* spawning: two concurrent runs
+        // would interleave `.part` writers and could stage and execute a
+        // half-written apply.cmd. A click that lands while another download
+        // or check is running is ignored.
+        {
+            let mut s = self.0.lock();
+            if s.busy {
+                return;
+            }
             s.busy = true;
             s.err = None;
             s.done_msg = None;
             s.progress = None;
-            drop(s);
+        }
+        let h = self.clone();
+        std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<()> {
                 let target = resolve_install_target();
                 if let Some(problem) = &target.problem {
