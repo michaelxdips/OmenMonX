@@ -9,19 +9,18 @@
 //! 1. `pawnio::PawnIo` — raw IOCTL transport, module loading
 //! 2. `ecio::EcIo` — port reads/writes with `Access_EC` mutex held
 //! 3. `eram` — classic 256 B ERAM register access (0x62/0x66 command/data)
-//! 4. `mailbox` — Insyde EC mailbox protocol (WQBC-decoded):
-//!    acquire MSMT mutex -> write reg index to EHWB -> set HWRC command ->
-//!    poll ECST -> read ECPC -> release
 
 mod error;
 pub mod pawnio;
 pub mod ecio;
 pub mod eram;
-pub mod mailbox;
-pub mod ecmp;
+
+// `ecmp_mmio` is intentionally NOT compiled: it is staged on the signed
+// Hpecmp PawnIO module (PawnIO signing gate). Do not delete
+// `ecmp_mmio.rs` or `Hpecmp.bin` — they will be re-enabled when the
+// module ships.
 
 pub use error::{Error, Result};
-pub use mailbox::EcMailbox;
 pub use eram::Eram;
 
 /// Empirically-locked Victus 8C9C register map (live correlation vs WMI

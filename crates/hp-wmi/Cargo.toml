@@ -7,8 +7,6 @@ license.workspace = true
 [dependencies]
 wmi = "0.14"
 windows = { workspace = true }
-windows-core = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 

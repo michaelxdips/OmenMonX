@@ -75,23 +75,44 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        let p = Self::path();
-        if let Ok(txt) = std::fs::read_to_string(&p) {
-            if let Ok(c) = toml::from_str(&txt) {
-                return c;
-            }
-        }
-        Self::default()
+        Self::load_from(&Self::path())
     }
 
     /// Load from an explicit path. Used by tests so they never touch the real
     /// user config, and available to any caller that needs to read a config that
     /// is not the active one.
+    ///
+    /// On a parse failure of an existing file, the file is copied to
+    /// `<path>.bak` first, so a corrupt config is preserved for recovery
+    /// instead of being silently overwritten by a later save of the defaults.
     pub fn load_from(p: &std::path::Path) -> Self {
-        std::fs::read_to_string(p)
-            .ok()
-            .and_then(|t| toml::from_str(&t).ok())
-            .unwrap_or_default()
+        if let Ok(txt) = std::fs::read_to_string(p) {
+            match toml::from_str::<Config>(&txt) {
+                Ok(c) => {
+                    let mut c = c;
+                    if !curve_monotonic_by_temp(&c.profile.curve) {
+                        eprintln!(
+                            "warning: fan curve in {} is not monotonic by temperature; using default curve",
+                            p.display()
+                        );
+                        c.profile.curve = FanProfile::default().curve;
+                    }
+                    return c;
+                }
+                Err(e) => {
+                    // Preserve the corrupt file before returning defaults; the
+                    // next save would otherwise destroy the user's settings.
+                    let bak = p.with_extension("toml.bak");
+                    let _ = std::fs::copy(p, &bak);
+                    eprintln!(
+                        "warning: failed to parse {}: {e}; preserved a copy at {}",
+                        p.display(),
+                        bak.display()
+                    );
+                }
+            }
+        }
+        Self::default()
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -99,11 +120,26 @@ impl Config {
     }
 
     /// Write to an explicit path, creating the parent directory.
+    ///
+    /// Serializes first and propagates the error — writing a 0-byte file on a
+    /// serialization failure would destroy the existing config. The write is
+    /// atomic: bytes land in `<path>.tmp` and are then renamed into place, so
+    /// a crash mid-write cannot leave a truncated config.
     pub fn save_to(&self, p: &std::path::Path) -> std::io::Result<()> {
+        let body = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(p, toml::to_string_pretty(self).unwrap_or_default())
+        let tmp = p.with_extension("toml.tmp");
+        std::fs::write(&tmp, body)?;
+        match std::fs::rename(&tmp, p) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
     }
 
     /// Parse the persisted thermal mode string.
@@ -164,7 +200,12 @@ impl Config {
             let (ta, tb) = (a.temp_c as f32, b.temp_c as f32);
             if temp_c <= tb {
                 let t = (temp_c - ta) / (tb - ta).max(0.001);
-                return (a.fan_pct as f32 + t * (b.fan_pct - a.fan_pct) as f32) as u8;
+                // The slope is computed in i16: a hand-edited non-monotonic
+                // curve must not underflow (debug panic / release wrap).
+                // Result is clamped to the legal 0..=100 range.
+                let diff = b.fan_pct as i16 - a.fan_pct as i16;
+                let v = a.fan_pct as f32 + t * diff as f32;
+                return v.clamp(0.0, 100.0) as u8;
             }
         }
         c.last().map(|p| p.fan_pct).unwrap_or(100)
@@ -175,6 +216,13 @@ fn dirs_next_home() -> PathBuf {
     std::env::var("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// True if every curve segment moves forward (or stays flat) in temperature.
+/// A hand-edited curve with a decreasing temperature would make interpolation
+/// meaningless; callers fall back to the default curve in that case.
+fn curve_monotonic_by_temp(curve: &[FanCurvePoint]) -> bool {
+    curve.windows(2).all(|w| w[1].temp_c >= w[0].temp_c)
 }
 
 #[cfg(test)]

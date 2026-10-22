@@ -12,11 +12,11 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Wmi::IWbemLocator;
 use windows::Win32::System::Ole::{
-    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayGetUBound,
+    SafeArrayAccessData, SafeArrayCreateVector, SafeArrayDestroy, SafeArrayGetUBound,
     SafeArrayUnaccessData,
 };
 
-use windows::Win32::System::Variant::VT_UI1;
+use windows::Win32::System::Variant::{VariantClear, VT_ARRAY, VT_BOOL, VT_EMPTY, VT_NULL, VT_UI1};
 use windows::Win32::System::Wmi::{
     IWbemClassObject, IWbemContext, IWbemServices, WBEM_FLAG_FORWARD_ONLY,
     WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_INFINITE, WbemContext,
@@ -123,11 +123,22 @@ impl HpWmi {
                     let mut pv = VARIANT::default();
                     if obj.Get(&BSTR::from("__PATH"), 0, &mut pv, None, None).is_ok() {
                         instance_path_captured = pv.to_string();
+                        let _ = VariantClear(&mut pv);
+                        if !instance_path_captured.is_empty() {
+                            // Prefer the FIRST instance with a usable path; later
+                            // enumeration results must not overwrite it.
+                            break;
+                        }
                     }
                 }
             }
             if !found {
                 return Err(Error::NoInstance);
+            }
+            if instance_path_captured.is_empty() {
+                // An instance exists but without a usable __PATH: every
+                // ExecMethod would target an empty object path.
+                return Err(Error::EmptyInstancePath);
             }
 
             let mut data_in_class: Option<IWbemClassObject> = None;
@@ -159,6 +170,17 @@ impl HpWmi {
     }
 
     pub fn send(&self, req: &Request, out_size: usize) -> Result<Response> {
+        // The unsafe Send/Sync impl on HpWmi means send() may run on any thread;
+        // COM must be initialised per-thread. Idempotent/refcounted: S_FALSE
+        // (already initialised) and RPC_E_CHANGED_MODE (COM already up with a
+        // different apartment model, which still works for these calls) are
+        // tolerated; genuine failures propagate.
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            if hr.is_err() && hr.0 != 1 && hr.0 != windows::Win32::Foundation::RPC_E_CHANGED_MODE.0 {
+                return Err(Error::ComInit(hr.ok().unwrap_err()));
+            }
+        }
         let method = method_for_size(out_size);
         unsafe {
             let input = self.data_in_class.SpawnInstance(0).map_err(Error::Windows)?;
@@ -196,12 +218,28 @@ impl HpWmi {
             let out_obj = get_object(&out_params, "OutData")?;
             let rw = get_u32(&out_obj, "rwReturnCode")?;
             // Victus hpqBDataOut* classes name the payload property "Data"
-            // (Omen boards used "OutData") — try both.
+            // (Omen boards used "OutData") — try both. Distinguish "property
+            // absent" (fall through to the alternate name) from "property
+            // present but empty": an empty array where out_size > 0 is expected
+            // is a firmware failure, never a zero Response — a silent 0x2A
+            // empty read would decode as all-zero limits and clamp requests.
             let data = match get_byte_array(&out_obj, "Data") {
-                Ok(v) if !v.is_empty() => v,
-                _ => get_byte_array(&out_obj, "OutData")
-                    .unwrap_or_default(),
+                Ok(v) => v,
+                Err(Error::MissingOutParam { .. }) => {
+                    match get_byte_array(&out_obj, "OutData") {
+                        Ok(v) => v,
+                        Err(Error::MissingOutParam { .. }) => Vec::new(),
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(e) => return Err(e),
             };
+            if data.is_empty() && out_size > 0 {
+                return Err(Error::EmptyResponse {
+                    method: method.into(),
+                    expected: out_size,
+                });
+            }
 
             Ok(Response { return_code: rw, data })
         }
@@ -222,9 +260,17 @@ unsafe fn variant_from_byte_array(data: &[u8]) -> Result<VARIANT> {
     }
     if !data.is_empty() {
         let mut ptr = std::ptr::null_mut();
-        SafeArrayAccessData(sa, &mut ptr).map_err(Error::Windows)?;
+        if let Err(e) = SafeArrayAccessData(sa, &mut ptr) {
+            // Nothing was written yet; destroy the array to avoid a leak.
+            let _ = SafeArrayDestroy(sa as *const SAFEARRAY);
+            return Err(Error::Windows(e));
+        }
         std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-        SafeArrayUnaccessData(sa).map_err(Error::Windows)?;
+        if let Err(e) = SafeArrayUnaccessData(sa) {
+            // The array is still locked AND leaked; release both.
+            let _ = SafeArrayDestroy(sa as *const SAFEARRAY);
+            return Err(Error::Windows(e));
+        }
     }
     let raw = imp::VARIANT {
         Anonymous: imp::VARIANT_0 {
@@ -259,6 +305,13 @@ unsafe fn get_bool(obj: &IWbemClassObject, name: &str) -> Result<bool> {
     let mut v = VARIANT::default();
     obj.Get(&BSTR::from(name), 0, &mut v, None, None).map_err(Error::Windows)?;
     let raw = v.as_raw().Anonymous.Anonymous;
+    if raw.vt != VT_BOOL.0 {
+        // VT_EMPTY/VT_NULL/etc: the property carries no answer. Report it as
+        // missing so send()'s `if let Ok(ret)` treats it as success per the
+        // documented contract — never re-interpret garbage union bytes as a
+        // bool (a false would read as a failed call).
+        return Err(Error::MissingOutParam { name: name.into() });
+    }
     Ok(raw.Anonymous.boolVal != 0)
 }
 
@@ -266,8 +319,9 @@ unsafe fn get_u32(obj: &IWbemClassObject, name: &str) -> Result<u32> {
     let mut v = VARIANT::default();
     obj.Get(&BSTR::from(name), 0, &mut v, None, None).map_err(Error::Windows)?;
     let raw = v.as_raw().Anonymous.Anonymous;
-    if raw.vt == imp::VT_EMPTY || raw.vt == 1u16 {
-        return Ok(0);
+    if raw.vt == VT_EMPTY.0 || raw.vt == VT_NULL.0 {
+        // A missing rwReturnCode must never fabricate Ok(0) = "success".
+        return Err(Error::MissingReturnCode { name: name.into() });
     }
     if raw.vt == 19u16 {
         Ok(raw.Anonymous.ulVal)
@@ -280,7 +334,7 @@ unsafe fn get_object(obj: &IWbemClassObject, name: &str) -> Result<IWbemClassObj
     let mut v = VARIANT::default();
     obj.Get(&BSTR::from(name), 0, &mut v, None, None).map_err(Error::Windows)?;
     let raw = v.as_raw().Anonymous.Anonymous;
-    if raw.vt == imp::VT_EMPTY || raw.vt == 1u16 || raw.Anonymous.punkVal.is_null() {
+    if raw.vt == VT_EMPTY.0 || raw.vt == VT_NULL.0 {
         return Err(Error::MissingOutParam { name: name.into() });
     }
     let unk = IUnknown::from_raw_borrowed(&raw.Anonymous.punkVal).unwrap().clone();
@@ -292,8 +346,16 @@ unsafe fn get_byte_array(obj: &IWbemClassObject, name: &str) -> Result<Vec<u8>> 
     let mut v = VARIANT::default();
     obj.Get(&BSTR::from(name), 0, &mut v, None, None).map_err(Error::Windows)?;
     let raw = v.as_raw().Anonymous.Anonymous;
-    if raw.vt == imp::VT_EMPTY || raw.vt == 1u16 {
-        return Ok(Vec::new());
+    if raw.vt == VT_EMPTY.0 || raw.vt == VT_NULL.0 {
+        // Property exists but carries no value — reported as missing so
+        // callers can fall through to an alternate property name.
+        return Err(Error::MissingOutParam { name: name.into() });
+    }
+    if raw.vt & VT_ARRAY.0 == 0 || raw.vt & VT_UI1.0 == 0 {
+        // Not a SAFEARRAY of UI1. The union bytes of any other VARIANT type
+        // must never be reinterpreted as a SAFEARRAY pointer.
+        let _ = VariantClear(&mut v);
+        return Err(Error::Shape("expected VT_ARRAY|VT_UI1 byte array"));
     }
     let sa: *mut windows::core::imp::SAFEARRAY = raw.Anonymous.parray;
     if sa.is_null() {
@@ -307,9 +369,13 @@ unsafe fn get_byte_array(obj: &IWbemClassObject, name: &str) -> Result<Vec<u8>> 
     }
     // Fast path: direct bulk read via SafeArrayAccessData (GetElement is unreliable here).
     let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-    SafeArrayAccessData(sa_win, &mut ptr).map_err(Error::Windows)?;
+    if let Err(e) = SafeArrayAccessData(sa_win, &mut ptr) {
+        return Err(Error::Windows(e));
+    }
     let mut out = vec![0u8; n];
     std::ptr::copy_nonoverlapping(ptr as *const u8, out.as_mut_ptr(), n);
-    SafeArrayUnaccessData(sa_win).map_err(Error::Windows)?;
+    if let Err(e) = SafeArrayUnaccessData(sa_win) {
+        return Err(Error::Windows(e));
+    }
     Ok(out)
 }

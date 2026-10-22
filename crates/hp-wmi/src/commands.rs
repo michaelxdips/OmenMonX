@@ -1,4 +1,20 @@
 //! Typed BIOS commands. Each maps to (Command, CommandType, in-payload, out-size).
+//!
+//! # Wiring plan
+//!
+//! The `Hpecmp` signature (`Sign` payload) is the prerequisite for commands the
+//! firmware refuses unsigned; the signing implementation lives in the
+//! `hp-ec` crate at `crates/hp-ec/src/ecmp_mmio.rs` (PawnyIO Hpecmp via MMIO).
+//! Wire that module into `session::HpWmi::send` before enabling commands that
+//! depend on signed writes — this note replaces the per-method TODOs that used
+//! to be scattered across this file.
+//!
+//! # Payload shapes the firmware rejects (board 8C9C)
+//!
+//! Command `0x29` (SetPowerLimit) accepts **4 bytes**, not 4 u32s. A legacy
+//! 16-byte little-endian `{pl1: u32, pl2: u32, pl4: u32, with_gpu: u32}`
+//! payload is rejected by that firmware; the correct shape is
+//! `{pl1: u8, pl4: u8, 0xFF, 0xFF}` (see [`Bios::set_power_limit`]).
 
 use crate::payload::{Request, Response, CMD_DEFAULT, CMD_KEYBOARD, CMD_LEGACY};
 use crate::Result;
@@ -45,17 +61,7 @@ impl Bios {
         Ok(Self { session: HpWmi::connect()? })
     }
 
-    /// Arbitrary raw request — for telemetry commands not yet wrapped.
-    pub fn raw_send(&self, req: Request, out_size: usize) -> Result<Response> {
-        self.ok(req, out_size)
-    }
-
     // ---- System / capability ----
-
-    /// 0x28 GetSystem — support flags (fan ctl, extreme mode, GPU switch bits).
-    pub fn get_system(&self) -> Result<Response> {
-        self.ok(Request::new(CMD_DEFAULT, 0x28), 128)
-    }
 
     /// 0x10 GetFanCount.
     pub fn get_fan_count(&self) -> Result<u8> {
@@ -120,12 +126,6 @@ impl Bios {
         ))
     }
 
-    /// 0x2E SetFanLevel — legacy per-fan level form.
-    pub fn set_fan_level(&self, levels: &[u8]) -> Result<()> {
-        self.ok(Request::with_data(CMD_DEFAULT, 0x2E, levels), 0)?;
-        Ok(())
-    }
-
     /// 0x26 GetMaxFan.
     pub fn get_max_fan(&self) -> Result<Response> {
         self.ok(Request::new(CMD_DEFAULT, 0x26), 4)
@@ -187,12 +187,6 @@ impl Bios {
     /// 0x1A SetFanMode — e.g. 0x30 default, 0x31 performance, 0x50 cool.
     pub fn set_fan_mode(&self, mode: u8) -> Result<()> {
         self.ok(Request::with_data(CMD_DEFAULT, 0x1A, &[0xFF, mode, 0, 0]), 0)?;
-        Ok(())
-    }
-
-    /// 0x1A SetFanMode with arbitrary payload (experimentation).
-    pub fn set_fan_mode_raw(&self, data: &[u8]) -> Result<()> {
-        self.ok(Request::with_data(CMD_DEFAULT, 0x1A, data), 0)?;
         Ok(())
     }
 
@@ -302,18 +296,16 @@ impl Bios {
         self.ok(Request::new(CMD_DEFAULT, 0x21), 4)
     }
 
-    /// 0x22 SetGpuPower — raw 4-byte payload.
-    pub fn set_gpu_power(&self, data: &[u8]) -> Result<()> {
-        self.ok(Request::with_data(CMD_DEFAULT, 0x22, data), 0)?;
-        Ok(())
-    }
-
     /// Legacy 0x52 GetGpuMode — 0 hybrid, 1 discrete, 2 optimus.
     pub fn get_gpu_mode(&self) -> Result<Response> {
         self.ok(Request::new(CMD_LEGACY, 0x52), 4)
     }
 
     /// Legacy 0x52 SetGpuMode (reboot required).
+    ///
+    /// **Known-refused path on 8C9C** (the BIOS answers with err 5); kept as a
+    /// documented non-capability so callers see the refusal rather than a
+    /// silent no-op.
     pub fn set_gpu_mode(&self, mode: u8) -> Result<()> {
         self.ok(Request::with_data(CMD_LEGACY, 0x52, &[mode, 0, 0, 0]), 0)?;
         Ok(())
@@ -362,19 +354,6 @@ impl Bios {
         Ok(w)
     }
 
-    /// 0x29 with independent PL1 and PL4, clamped to their separate ceilings.
-    ///
-    /// Prefer [`Bios::set_power_limit`] unless PL4 genuinely needs to differ.
-    pub fn set_power_limit_pair(&self, pl1: u8, pl4: u8) -> Result<(u8, u8)> {
-        let pl1 = pl1.clamp(CpuPowerLimits::MIN_WATTS, CpuPowerLimits::MAX_PL1);
-        let pl4 = pl4.clamp(CpuPowerLimits::MIN_WATTS, CpuPowerLimits::MAX_PL4);
-        self.ok(
-            Request::with_data(CMD_DEFAULT, 0x29, &[pl1, pl4, 0xFF, 0xFF]),
-            0,
-        )?;
-        Ok((pl1, pl4))
-    }
-
     /// Restore the firmware's own power block by sending an over-limit value.
     ///
     /// This is the only reset that is correct on **both** supplies. The firmware
@@ -389,29 +368,6 @@ impl Bios {
             Request::with_data(CMD_DEFAULT, 0x29, &[0xFE, 0xFE, 0xFF, 0xFF]),
             0,
         )?;
-        Ok(())
-    }
-
-    /// 0x29 SetConcurrentTdp — writes the WithGpu / concurrent-TDP field at 0x2A[7].
-    ///
-    /// Byte order `{0xFF, 0xFF, 0xFF, tdp}`. Verified 7/7 across a 20-38-20 sweep.
-    pub fn set_concurrent_tdp(&self, watts: u8) -> Result<()> {
-        self.ok(
-            Request::with_data(CMD_DEFAULT, 0x29, &[0xFF, 0xFF, 0xFF, watts]),
-            0,
-        )?;
-        Ok(())
-    }
-
-    /// Legacy 4-field form. Kept for boards that accept it, but **do not** use it
-    /// on 8C9C: that firmware wants 4 *bytes*, not 4 u32s, and rejects this shape.
-    pub fn set_cpu_power_u32(&self, pl1: u32, pl2: u32, pl4: u32, with_gpu: u32) -> Result<()> {
-        let mut d = Vec::with_capacity(16);
-        d.extend_from_slice(&pl1.to_le_bytes());
-        d.extend_from_slice(&pl2.to_le_bytes());
-        d.extend_from_slice(&pl4.to_le_bytes());
-        d.extend_from_slice(&with_gpu.to_le_bytes());
-        self.ok(Request::with_data(CMD_DEFAULT, 0x29, &d), 0)?;
         Ok(())
     }
 

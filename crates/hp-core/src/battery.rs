@@ -95,7 +95,7 @@ pub fn read_battery() -> BatteryInfo {
     if let Some(st) = first(wmi_ns.raw_query::<WmiStatus>("SELECT Voltage, ChargeRate, DischargeRate, Charging, PowerOnline, RemainingCapacity FROM BatteryStatus")) {
         info.voltage_mv = Some(st.voltage);
         // rate: positive = charging, negative = draining
-        info.rate_mw = Some(if st.charging { st.charge_rate.max(st.discharge_rate) } else { -st.discharge_rate });
+        info.rate_mw = Some(if st.charging { st.charge_rate.max(st.discharge_rate) } else { st.discharge_rate.wrapping_neg() });
         info.charging = st.charging;
         info.ac_online = st.power_online;
         // charge % from remaining vs full

@@ -13,8 +13,6 @@ pub struct ThermalSample {
     pub gpu_hotspot: Option<f32>,
     /// WMI sensors 0..4 raw
     pub wmi_sensors: [u8; 5],
-    /// Fan RPM (EC word @0xC4)
-    pub fan_rpm: Option<u16>,
     /// Fan level percent (WMI)
     pub fan_level_pct: Option<u8>,
 }
@@ -50,11 +48,9 @@ pub fn read_thermal_ec(io: &EcIo) -> Option<ThermalSample> {
         s.cpu = eram.read(0xB7).ok().map(|v| v as f32);
         s.gpu = eram.read(0xB2).ok().map(|v| v as f32);
         s.gpu_hotspot = eram.read(0xB0).ok().map(|v| v as f32);
-        let lo = eram.read(0xC4).ok();
-        let hi = eram.read(0xC5).ok();
-        if let (Some(lo), Some(hi)) = (lo, hi) {
-            s.fan_rpm = Some(u16::from_le_bytes([lo, hi]));
-        }
+        // NOTE: EC 0xC4/0xC5 (fan tachometer word) is deliberately NOT read:
+        // on board 8C9C 0xC4 is a frozen register that reports a constant
+        // 1249 rpm, and nothing consumed the value.
         Ok::<(), hp_ec::Error>(())
     })
     .ok()?;

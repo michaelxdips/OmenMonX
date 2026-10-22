@@ -50,6 +50,10 @@ pub enum SetResult {
     /// rc 5 — the name exists but this value was rejected. This is the code that
     /// `Battery Care Function` returns for every value on board 8C9C.
     ValueRejected,
+    /// The firmware's return code could not be read (Get failed or the property
+    /// came back VT_EMPTY/VT_NULL). This is a plumbing failure, not a firmware
+    /// verdict, and must never display as "unexpected code 4294967295".
+    Plumbing,
     /// Any other code, passed through untouched.
     Other(u32),
 }
@@ -82,6 +86,9 @@ impl SetResult {
             SetResult::ValueRejected => 5,
             SetResult::AcceptedNeedsReboot => 6,
             SetResult::Other(c) => c,
+            // Plumbing has no firmware code; report a distinct sentinel so the
+            // UI never shows it as "unexpected code 4294967295".
+            SetResult::Plumbing => u32::MAX,
         }
     }
 }
@@ -93,6 +100,7 @@ impl fmt::Display for SetResult {
             SetResult::AcceptedNeedsReboot => write!(f, "accepted (reboot required)"),
             SetResult::UnknownSetting => write!(f, "no such setting"),
             SetResult::ValueRejected => write!(f, "value rejected by firmware"),
+            SetResult::Plumbing => write!(f, "firmware return code could not be read (plumbing failure, not a firmware verdict)"),
             SetResult::Other(c) => write!(f, "unexpected code {c}"),
         }
     }
@@ -193,8 +201,13 @@ impl BiosSettings {
                 if let Some(obj) = &objs[0] {
                     let mut pv = VARIANT::default();
                     if obj.Get(&BSTR::from("__PATH"), 0, &mut pv, None, None).is_ok() {
-                        instance_path = pv.to_string();
+                        let captured = pv.to_string();
                         let _ = VariantClear(&mut pv);
+                        if !captured.is_empty() {
+                            // Prefer the FIRST instance with a usable path.
+                            instance_path = captured;
+                            break;
+                        }
                     }
                 }
             }
@@ -250,7 +263,7 @@ impl BiosSettings {
                     out.push(BiosSetting {
                         current: get_string(obj, "CurrentValue"),
                         possible: get_string_array(obj, "PossibleValues"),
-                        read_only: get_bool(obj, "IsReadOnly"),
+                        read_only: get_bool(obj, "IsReadOnly").unwrap_or(false),
                         name,
                     });
                 }
@@ -294,9 +307,9 @@ impl BiosSettings {
 
             let in_params = in_sig.SpawnInstance(0)?;
 
-            put_string(&in_params, "Name", name);
-            put_string(&in_params, "Password", "");
-            put_string(&in_params, "Value", value);
+            put_string(&in_params, "Name", name)?;
+            put_string(&in_params, "Password", "")?;
+            put_string(&in_params, "Value", value)?;
 
             let mut out_params: Option<IWbemClassObject> = None;
             self.services.ExecMethod(
@@ -316,7 +329,12 @@ impl BiosSettings {
                 )
             })?;
             let code = get_u32(&out_params, "Return");
-            Ok(SetResult::from_code(code))
+            Ok(match code {
+                Some(c) => SetResult::from_code(c),
+                // Get failed or the property was empty: a plumbing failure,
+                // never a firmware return code.
+                None => SetResult::Plumbing,
+            })
         }
     }
 }
@@ -334,32 +352,42 @@ unsafe fn get_string(obj: &IWbemClassObject, prop: &str) -> String {
     }
 }
 
-unsafe fn get_bool(obj: &IWbemClassObject, prop: &str) -> bool {
+unsafe fn get_bool(obj: &IWbemClassObject, prop: &str) -> Option<bool> {
     let mut v = VARIANT::default();
     if obj.Get(&BSTR::from(prop), 0, &mut v, None, None).is_err() {
-        return false;
+        return None;
     }
     let raw = v.as_raw().Anonymous.Anonymous;
-    let out = raw.Anonymous.boolVal != 0;
+    let out = if raw.vt == 11 {
+        // VT_BOOL only: union bytes of other types must not be read as bool.
+        Some(raw.Anonymous.boolVal != 0)
+    } else {
+        // VT_EMPTY/VT_NULL: "missing", not false — false would mean
+        // "not read-only", which is exactly the misread to avoid.
+        None
+    };
     let _ = VariantClear(&mut v);
     out
 }
 
 /// `Return` is a CIM uint32, which WMI marshals as a signed 32-bit variant.
-unsafe fn get_u32(obj: &IWbemClassObject, prop: &str) -> u32 {
+///
+/// `None` = the Get failed or the property was VT_EMPTY/VT_NULL. That must stay
+/// distinguishable from a real firmware code: `u32::MAX` is a valid `Other` rc.
+unsafe fn get_u32(obj: &IWbemClassObject, prop: &str) -> Option<u32> {
     let mut v = VARIANT::default();
     if obj.Get(&BSTR::from(prop), 0, &mut v, None, None).is_err() {
-        return u32::MAX;
+        return None;
     }
     let raw = v.as_raw().Anonymous.Anonymous;
     let vt = raw.vt;
     let out = if vt == 0 || vt == 1 {
-        // VT_EMPTY / VT_NULL: treat as "no answer", not as success.
-        u32::MAX
+        // VT_EMPTY / VT_NULL: no answer at all, not a code.
+        None
     } else if vt == 19 {
-        raw.Anonymous.ulVal
+        Some(raw.Anonymous.ulVal)
     } else {
-        raw.Anonymous.lVal as u32
+        Some(raw.Anonymous.lVal as u32)
     };
     let _ = VariantClear(&mut v);
     out
@@ -431,10 +459,13 @@ unsafe fn get_string_array(obj: &IWbemClassObject, prop: &str) -> Vec<String> {
     out
 }
 
-unsafe fn put_string(obj: &IWbemClassObject, prop: &str, val: &str) {
+unsafe fn put_string(obj: &IWbemClassObject, prop: &str, val: &str) -> windows::core::Result<()> {
     let mut v = VARIANT::from(BSTR::from(val));
-    let _ = obj.Put(&BSTR::from(prop), 0, &v, 0);
+    // A silently failed Put sends empty params to the firmware, and the rc=1
+    // back would mislead the user into thinking the setting name is wrong.
+    let out = obj.Put(&BSTR::from(prop), 0, &v, 0);
     let _ = VariantClear(&mut v);
+    out
 }
 #[cfg(test)]
 mod tests {

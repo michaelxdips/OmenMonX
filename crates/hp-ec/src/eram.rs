@@ -55,8 +55,26 @@ impl<'a> Eram<'a> {
         Err(last)
     }
 
+    /// Drain any stale byte sitting in the output buffer before starting a
+    /// transaction. After an interrupted transaction the EC may still hold an
+    /// unread data byte; without this the next read returns that stale byte
+    /// instead of the value for the register we just addressed.
+    fn drain_obf(&self) -> Result<()> {
+        // Bounded: each drained byte costs one port read; cap the loop so a
+        // wedged EC cannot spin us forever.
+        for _ in 0..64 {
+            let st = self.io.port_read(EC_CMD)?;
+            if st & OBF == 0 {
+                return Ok(());
+            }
+            let _ = self.io.port_read(EC_DATA)?;
+        }
+        Err(crate::Error::Timeout { what: "OBF drain", ms_ms: 100 })
+    }
+
     fn read_once(&self, reg: u8) -> Result<u8> {
         // Command-based (Insyde/ITE style)
+        self.drain_obf()?;
         self.wait_ibf_clear()?;
         self.io.port_write(EC_CMD, 0x80)?;
         self.wait_ibf_clear()?;
@@ -68,6 +86,7 @@ impl<'a> Eram<'a> {
     /// Write one ERAM byte at `reg`. Caller must hold the EC mutex.
     pub fn write(&self, reg: u8, value: u8) -> Result<()> {
         // Command-based (WR_EC 0x81)
+        self.drain_obf()?;
         self.wait_ibf_clear()?;
         self.io.port_write(EC_CMD, 0x81)?;
         self.wait_ibf_clear()?;

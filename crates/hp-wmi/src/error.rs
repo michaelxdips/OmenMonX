@@ -28,6 +28,15 @@ pub enum Error {
     #[error("missing out-parameter '{name}' in response")]
     MissingOutParam { name: String },
 
+    #[error("missing '{name}' in response — no return code, command result unknown (never treat as success)")]
+    MissingReturnCode { name: String },
+
+    #[error("hpqBIntM instance found but its __PATH is empty — cannot invoke methods on it")]
+    EmptyInstancePath,
+
+    #[error("method {method} returned an empty payload where {expected} bytes were expected — not a valid zero response")]
+    EmptyResponse { method: String, expected: usize },
+
     #[error("BIOS returned error code {code} for command 0x{command:X} type 0x{command_type:X}")]
     BiosError {
         code: u32,
