@@ -291,7 +291,6 @@ impl eframe::App for App {
                         theme::Page::Performance => self.page_performance(ui, &p, &st),
                         theme::Page::Lighting => self.page_lighting(ui, &p, &st),
                         theme::Page::System => self.page_system(ui, &p, &st),
-                        theme::Page::About => self.page_about(ui, &p, &st),
                     });
             });
     }

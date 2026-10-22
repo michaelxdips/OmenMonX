@@ -18,53 +18,42 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Type scale, in points. Fixed steps so the eye learns them.
-///
-/// Nothing else is a valid font size. A literal size in a page file is a bug:
-/// it is how a UI ends up with eleven slightly different labels that read as
-/// noise rather than hierarchy.
-pub const DISPLAY: f32 = 40.0;
+/// Type scale, in points. Four steps; nothing else is a valid font size.
 pub const HERO: f32 = 32.0;
-pub const VALUE: f32 = 19.0;
-pub const BODY: f32 = 13.5;
+pub const VALUE: f32 = 18.0;
+pub const BODY: f32 = 13.0;
 pub const LABEL: f32 = 11.0;
 
-/// Page-title size. Sits between [`HERO`] and [`DISPLAY`] in the scale and is
-/// named rather than written as `DISPLAY * 0.62` at the call site.
-pub const TITLE: f32 = 24.0;
-
-/// Spacing scale. Every gap is one of these; 4 / 8 / 12 / 16 / 24 / 32 and
-/// nothing in between.
+/// Spacing scale. Three steps: card pad, stack gap, row gap.
 pub mod space {
-    /// 4 — inside a tight pair (label to its value).
-    pub const XS: f32 = 4.0;
     /// 8 — inside a card between rows.
     pub const SM: f32 = 8.0;
     /// 12 — between stacked cards.
     pub const MD: f32 = 12.0;
     /// 16 — card padding, gutter.
     pub const LG: f32 = 16.0;
-    /// 24 — between page sections.
+    /// Deprecated aliases. Kept so old ui.toml files still parse.
+    #[allow(dead_code)]
+    pub const XS: f32 = 4.0;
+    #[allow(dead_code)]
     pub const XL: f32 = 24.0;
-    /// 32 — page margins, hero separation.
+    #[allow(dead_code)]
     pub const XXL: f32 = 32.0;
 }
 
 /// Corner radii. Three values, each with one job.
 pub mod radius {
-    /// 6 — controls: buttons, inputs, pills that are not fully round.
+    /// 6 — controls: buttons, inputs.
     pub const CONTROL: f32 = 6.0;
     /// 10 — cards and other raised surfaces.
     pub const CARD: f32 = 10.0;
-    /// Fully round. Used for pills and status dots.
-    pub const PILL: f32 = 999.0;
 }
 
 /// Hairline width. One pixel at every DPI, never two.
 pub const HAIRLINE: f32 = 1.0;
 
-/// Sidebar width. Wide enough for "Performance" at the body size.
-pub const RAIL_W: f32 = 212.0;
+/// Sidebar width. Icon rail: 68 px, labels on hover.
+pub const RAIL_W: f32 = 68.0;
 
 /// The two elevations in the app, expressed as the frame each one draws.
 ///
@@ -111,60 +100,34 @@ pub enum Page {
     Performance,
     Lighting,
     System,
-    About,
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 4] = [
         Page::Dashboard,
         Page::Performance,
         Page::Lighting,
         Page::System,
-        Page::About,
     ];
 
     pub fn title(self) -> &'static str {
         match self {
-            Page::Dashboard => "Dashboard",
-            Page::Performance => "Performance",
+            Page::Dashboard => "Overview",
+            Page::Performance => "Control",
             Page::Lighting => "Lighting",
             Page::System => "System",
-            Page::About => "About",
         }
     }
 
-    /// One-line description shown under the page title. Keeps every screen
-    /// self-explanatory without a tooltip.
-    pub fn subtitle(self) -> &'static str {
+    /// Two-letter rail mark. The rail is icons only; the full name is the hover.
+    pub fn short(self) -> &'static str {
         match self {
-            Page::Dashboard => "Live thermal, fan and battery state",
-            Page::Performance => "Power ceiling, thermal profile and display cadence",
-            Page::Lighting => "Keyboard zones, straight from the firmware table",
-            Page::System => "BIOS settings with the firmware's own return code",
-            Page::About => "Build identity and what was measured on this board",
+            Page::Dashboard => "OV",
+            Page::Performance => "CT",
+            Page::Lighting => "LT",
+            Page::System => "SY",
         }
     }
-
-    /// A simple geometric glyph, drawn rather than fonted so it cannot fall back
-    /// to a tofu box on a machine without the icon font.
-    pub fn glyph(self) -> Glyph {
-        match self {
-            Page::Dashboard => Glyph::Gauge,
-            Page::Performance => Glyph::Bolt,
-            Page::Lighting => Glyph::Bulb,
-            Page::System => Glyph::Chip,
-            Page::About => Glyph::Info,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Glyph {
-    Gauge,
-    Bolt,
-    Bulb,
-    Chip,
-    Info,
 }
 
 /// Everything the UI remembers between runs.
@@ -625,40 +588,30 @@ mod tests {
         assert_eq!(s.page, Page::System, "the rest of the file must still load");
     }
 
-    /// Every page needs a title, a subtitle and a glyph; a missing arm would be
+    /// Every page needs a title and a short rail mark; a missing arm would be
     /// a compile error, but an empty string is not, so check it.
     #[test]
     fn every_page_has_copy() {
         for p in Page::ALL {
             assert!(!p.title().is_empty());
-            assert!(!p.subtitle().is_empty());
-            let _ = p.glyph();
+            assert!(!p.short().is_empty());
         }
     }
 
-    /// The spacing scale has to stay a scale. If someone adds 10.0 because it
-    /// "looked better", every gap in the app stops relating to every other gap.
+    /// The spacing scale is three steps: row gap, stack gap, card pad.
     #[test]
     fn spacing_scale_is_the_documented_set() {
-        let steps = [
-            space::XS,
-            space::SM,
-            space::MD,
-            space::LG,
-            space::XL,
-            space::XXL,
-        ];
-        assert_eq!(steps, [4.0, 8.0, 12.0, 16.0, 24.0, 32.0]);
+        let steps = [space::SM, space::MD, space::LG];
+        assert_eq!(steps, [8.0, 12.0, 16.0]);
         // Strictly increasing, so "next step up" is always meaningful.
         assert!(steps.windows(2).all(|w| w[1] > w[0]));
     }
 
-    /// Three radii, three jobs. A fourth is how "rounded" stops meaning anything.
+    /// Two radii, two jobs. A third is how "rounded" stops meaning anything.
     #[test]
     fn radius_scale_has_three_values() {
         assert_eq!(radius::CONTROL, 6.0);
         assert_eq!(radius::CARD, 10.0);
-        assert_eq!(radius::PILL, 999.0);
         // The ordering is a compile-time invariant, so state it as one.
         const _: () = assert!(radius::CONTROL < radius::CARD);
     }
@@ -682,11 +635,11 @@ mod tests {
         assert_eq!(flat.fill, p.panel);
     }
 
-    /// The type scale is the documented five steps plus the page title.
+    /// The type scale is four steps: label, body, value, hero.
     #[test]
     fn type_scale_is_the_documented_set() {
-        let scale = [LABEL, BODY, VALUE, TITLE, HERO, DISPLAY];
-        assert_eq!(scale, [11.0, 13.5, 19.0, 24.0, 32.0, 40.0]);
+        let scale = [LABEL, BODY, VALUE, HERO];
+        assert_eq!(scale, [11.0, 13.0, 18.0, 32.0]);
         assert!(scale.windows(2).all(|w| w[1] > w[0]), "the scale must be ordered");
     }
 

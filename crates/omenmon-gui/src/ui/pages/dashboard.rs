@@ -1,21 +1,17 @@
-//! Dashboard: the two numbers people open the app for, plus the slow context.
+//! Overview: live numbers only. No controls on this page.
 
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 
-use crate::sampler::{ControlRequest, History, SharedState};
+use crate::sampler::{History, SharedState};
 use crate::theme::{space, Palette};
 use crate::ui::components as c;
 use crate::widgets as w;
 use crate::App;
 
-/// Full scale for the temperature gauges. 110 °C is above any throttle point on
-/// this board, so the arc has headroom instead of pegging at a normal load.
-const TEMP_SCALE: f32 = 110.0;
-
 impl App {
     pub fn page_dashboard(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState, hist: &History) {
-        self.thermal_hero(ui, p, st);
+        self.thermal_stats(ui, p, st);
         ui.add_space(space::MD);
 
         c::two_columns(ui, |ui, side| match side {
@@ -25,56 +21,65 @@ impl App {
                 self.battery_card(ui, p, st);
             }
             c::Column::Right => {
-                self.fan_card(ui, p, st);
+                self.fan_status_card(ui, p, st);
                 ui.add_space(space::MD);
                 self.curve_card(ui, p, st);
             }
         });
     }
 
-    /// Gauges across the top, with the four control values beside them.
-    fn thermal_hero(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
+    fn thermal_stats(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
         let s = st.sample.as_ref();
         let cpu = s.and_then(|x| x.cpu);
         let gpu = s.and_then(|x| x.gpu);
         let hotspot = s.and_then(|x| x.gpu_hotspot);
 
         w::card(ui, p, "THERMALS", |ui| {
+            if cpu.is_none() && gpu.is_none() {
+                w::empty(
+                    ui,
+                    p,
+                    "no thermal sensors",
+                    Some("0x23 needs an elevated token; battery readings still work"),
+                );
+                ui.add_space(space::SM);
+            }
             ui.horizontal(|ui| {
-                let d = if self.ui.compact { 118.0 } else { 150.0 };
-                gauge_or_absence(ui, p, cpu, d, "CPU");
+                w::stat(
+                    ui,
+                    p,
+                    "cpu",
+                    &cpu.map(|v| format!("{v:.0} C")).unwrap_or_else(|| "--".into()),
+                    cpu.map(|v| p.temp(v)).unwrap_or(p.faint()),
+                );
                 ui.add_space(space::MD);
-                gauge_or_absence(ui, p, gpu, d, "GPU");
-
-                ui.add_space(space::LG);
-                ui.vertical(|ui| {
-                    if cpu.is_none() && gpu.is_none() {
-                        // An empty card states why it is empty and what would
-                        // fill it. A dash would be an absence with no cause.
-                        w::empty(
-                            ui,
-                            p,
-                            "no thermal sensors",
-                            Some("0x23 needs an elevated token; battery readings still work"),
-                        );
-                        ui.add_space(space::SM);
-                    }
-                    self.cap_stat(ui, p, st);
-                    ui.add_space(space::SM);
-                    thermal_stat(ui, p, st);
-                    ui.add_space(space::SM);
-                    w::stat(ui, p, "clock", &format!("{:.0} MHz", st.clock_mhz), p.gpu);
-                    if let Some(h) = hotspot {
-                        ui.add_space(space::SM);
-                        w::stat(ui, p, "hotspot", &format!("{h:.0} \u{00b0}C"), p.temp(h));
-                    }
-                });
+                w::stat(
+                    ui,
+                    p,
+                    "gpu",
+                    &gpu.map(|v| format!("{v:.0} C")).unwrap_or_else(|| "--".into()),
+                    gpu.map(|v| p.temp(v)).unwrap_or(p.faint()),
+                );
+                ui.add_space(space::MD);
+                w::stat(
+                    ui,
+                    p,
+                    "hotspot",
+                    &hotspot
+                        .map(|v| format!("{v:.0} C"))
+                        .unwrap_or_else(|| "--".into()),
+                    hotspot.map(|v| p.temp(v)).unwrap_or(p.faint()),
+                );
+                ui.add_space(space::MD);
+                w::stat(ui, p, "clock", &format!("{:.0} MHz", st.clock_mhz), p.gpu);
+                ui.add_space(space::MD);
+                self.cap_stat(ui, p, st);
             });
+            ui.add_space(space::SM);
+            thermal_stat(ui, p, st);
         });
     }
 
-    /// The cap, amber when it is below what this supply allows: that is a
-    /// deliberate throttle and it is easy to forget.
     fn cap_stat(&self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
         let cap = st.limits.map(|l| l.pl1);
         let ceiling = st
@@ -96,16 +101,13 @@ impl App {
                 return;
             }
             if hist.cpu.len() < 2 {
-                // Only promise a chart when a chart is possible. Without the WMI
-                // interface there is no source, so "collecting" forever would be
-                // a lie.
                 if st.bios_ok {
-                    w::empty(ui, p, "collecting samples\u{2026}", Some("the chart fills at 1 Hz"));
+                    w::empty(ui, p, "collecting samples", Some("the chart fills at 1 Hz"));
                 } else {
                     w::empty(
                         ui,
                         p,
-                        "no samples \u{2014} thermal source unavailable",
+                        "no samples - thermal source unavailable",
                         Some("run elevated to record the history"),
                     );
                 }
@@ -124,90 +126,57 @@ impl App {
                 .map(|(i, v)| [i as f64, *v as f64])
                 .collect();
             Plot::new("hist")
-                .height(140.0)
+                .height(160.0)
                 .show_axes([false, true])
                 .allow_drag(false)
                 .allow_scroll(false)
                 .allow_zoom(false)
                 .allow_boxed_zoom(false)
-                .legend(egui_plot::Legend::default())
                 .show(ui, |pl| {
-                    pl.line(Line::new(cpu_pts).name("CPU").color(p.cpu).width(1.8_f32));
-                    pl.line(Line::new(gpu_pts).name("GPU").color(p.gpu).width(1.8_f32));
+                    pl.line(Line::new(cpu_pts).color(p.cpu).width(1.8_f32));
+                    pl.line(Line::new(gpu_pts).color(p.gpu).width(1.8_f32));
                 });
         });
     }
 
-    fn fan_card(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
+    fn fan_status_card(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
         let lvl = st.sample.as_ref().and_then(|s| s.fan_level_pct);
-        w::card_badge(
-            ui,
-            p,
-            "COOLING",
-            Some(("firmware-managed", p.dim)),
-            |ui| {
-                ui.horizontal(|ui| {
-                    w::stat(
-                        ui,
-                        p,
-                        "fan level",
-                        &lvl.map(|v| format!("{v} %")).unwrap_or_else(|| "--".into()),
-                        match lvl {
-                            Some(v) if v >= 80 => p.amber,
-                            Some(_) => p.text,
-                            None => p.faint(),
-                        },
-                    );
-                    ui.add_space(space::XL);
-                    // The EC tachometer is not shown: 0xC4 reads a frozen 1249 rpm
-                    // on this board, so an RPM number here would be a lie dressed
-                    // as data. The level byte is live and is what is shown.
-                    w::stat(
-                        ui,
-                        p,
-                        "fans",
-                        &st.fan_count.map(|n| format!("{n}")).unwrap_or_else(|| "--".into()),
-                        p.text,
-                    );
-                });
-                ui.add_space(space::MD);
-                if let Some(v) = lvl {
-                    let col = if v >= 80 {
-                        p.amber
-                    } else if v >= 40 {
-                        p.gpu
-                    } else {
-                        p.green
-                    };
-                    w::meter(ui, p, "duty", &format!("{v} %"), v as f32 / 100.0, col);
-                }
-
-                ui.add_space(space::MD);
-                ui.horizontal(|ui| {
-                    // OGH's "Max" — verified working: the level rises 23 -> 59 and
-                    // stays there. Spinning fans up is always safe, so this needs
-                    // no confirmation.
-                    if w::primary_button(ui, p, "Max", st.elevated).clicked() {
-                        self.write(ControlRequest::SetMaxFan(true));
-                    }
-                    // The way back. Kept as its own button because `Max` off does
-                    // not release the fans on this board — verified: the level
-                    // stayed pinned at 58-59 for 25 s, twice, and through a thermal
-                    // profile change. Without this button the fan would be stuck.
-                    if w::quiet_button(ui, p, "Hand back to firmware", st.elevated).clicked() {
-                        self.write(ControlRequest::ReleaseMaxFan);
-                    }
-                });
-                ui.add_space(space::SM);
-                c::caption(
+        w::card(ui, p, "COOLING", |ui| {
+            ui.horizontal(|ui| {
+                w::stat(
                     ui,
                     p,
-                    "Max holds the fans at full speed until you hand them back; \
-                     the firmware does not release them on its own",
+                    "fan level",
+                    &lvl.map(|v| format!("{v} %")).unwrap_or_else(|| "--".into()),
+                    match lvl {
+                        Some(v) if v >= 80 => p.amber,
+                        Some(_) => p.text,
+                        None => p.faint(),
+                    },
                 );
-                c::write_feedback(ui, p, st, self.pending_since);
-            },
-        );
+                ui.add_space(space::MD);
+                w::stat(
+                    ui,
+                    p,
+                    "fans",
+                    &st.fan_count.map(|n| format!("{n}")).unwrap_or_else(|| "--".into()),
+                    p.text,
+                );
+            });
+            ui.add_space(space::MD);
+            if let Some(v) = lvl {
+                let col = if v >= 80 {
+                    p.amber
+                } else if v >= 40 {
+                    p.gpu
+                } else {
+                    p.green
+                };
+                w::meter(ui, p, "duty", &format!("{v} %"), v as f32 / 100.0, col);
+            }
+            ui.add_space(space::SM);
+            c::caption(ui, p, "level byte is live; fan controls live under Control");
+        });
     }
 
     fn battery_card(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
@@ -219,7 +188,7 @@ impl App {
             let pct = b.charge_pct.unwrap_or(0);
             ui.horizontal(|ui| {
                 w::stat(ui, p, "charge", &format!("{pct} %"), p.text);
-                ui.add_space(space::XL);
+                ui.add_space(space::MD);
                 if let Some(h) = b.health_pct {
                     w::stat(
                         ui,
@@ -229,7 +198,7 @@ impl App {
                         if h < 70 { p.red } else { p.green },
                     );
                 }
-                ui.add_space(space::XL);
+                ui.add_space(space::MD);
                 w::stat(
                     ui,
                     p,
@@ -252,20 +221,20 @@ impl App {
                 extra.push(format!("{cy} cycles"));
             }
             if let Some(t) = b.temp_c {
-                extra.push(format!("{t:.1} \u{00b0}C"));
+                extra.push(format!("{t:.1} C"));
             }
             if let Some(h) = b.health_pct {
                 extra.push(format!("{} % wear", 100u32.saturating_sub(h as u32)));
             }
             if !extra.is_empty() {
-                ui.add_space(space::XS);
-                c::caption(ui, p, &extra.join("   \u{00b7}   "));
+                ui.add_space(space::SM);
+                c::caption(ui, p, &extra.join("   -   "));
             }
         });
     }
 
     fn curve_card(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
-        w::card(ui, p, "FAN CURVE \u{00b7} FIRMWARE", |ui| {
+        w::card(ui, p, "FAN CURVE - FIRMWARE", |ui| {
             let Some(t) = st.fan_table.as_ref() else {
                 w::empty(ui, p, "fan table unreadable", Some("requires the BIOS WMI interface"));
                 return;
@@ -273,12 +242,12 @@ impl App {
             c::caption(
                 ui,
                 p,
-                &format!("{} fans \u{00b7} {} points \u{00b7} read-only", t.fan_count, t.level_count),
+                &format!("{} fans - {} points - read-only", t.fan_count, t.level_count),
             );
             if self.ui.compact {
                 return;
             }
-            ui.add_space(space::XS);
+            ui.add_space(space::SM);
             let fans = t.fan_count as usize;
             let series: Vec<Vec<[f64; 2]>> = (0..fans.min(3))
                 .map(|f| {
@@ -312,7 +281,7 @@ impl App {
                 ui,
                 p,
                 &format!(
-                    "peak {}%  \u{00b7}  monotonic {}  \u{00b7}  column 0 is a level index, not a temperature",
+                    "peak {}%  -  monotonic {}",
                     t.max_duty(),
                     if t.is_monotonic() { "yes" } else { "no" }
                 ),
@@ -321,30 +290,6 @@ impl App {
     }
 }
 
-/// A gauge, or an explicit "no reading" gauge.
-///
-/// A gauge with no data must not look like a gauge reading zero: `0 °C` is a
-/// measurement, `--` is an absence.
-fn gauge_or_absence(ui: &mut egui::Ui, p: &Palette, value: Option<f32>, diameter: f32, caption: &str) {
-    let (text, colour) = match value {
-        Some(v) => (format!("{v:.0}"), p.temp(v)),
-        None => ("--".into(), p.faint()),
-    };
-    w::gauge(
-        ui,
-        p,
-        &w::Gauge {
-            diameter,
-            fraction: value.unwrap_or(0.0) / TEMP_SCALE,
-            centre: &text,
-            unit: "\u{00b0}C",
-            caption,
-            colour,
-        },
-    );
-}
-
-/// The thermal profile, named rather than shown as a status byte.
 fn thermal_stat(ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
     let therm = hp_wmi::ThermalMode::from_status(st.thermal_status);
     let text = match therm {

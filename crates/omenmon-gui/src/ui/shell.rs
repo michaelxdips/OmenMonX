@@ -7,7 +7,7 @@
 use eframe::egui;
 
 use crate::sampler::SharedState;
-use crate::theme::{self, radius, space, Page, Palette, Theme, BODY, LABEL, RAIL_W};
+use crate::theme::{self, radius, space, Page, Palette, BODY, HERO, LABEL, RAIL_W};
 use crate::ui::components as c;
 use crate::{elevate, safety, widgets as w, App};
 
@@ -15,46 +15,29 @@ use crate::{elevate, safety, widgets as w, App};
 /// import of the token.
 pub const RAIL_WIDTH: f32 = RAIL_W;
 
-/// The rail's own padding: tighter than a page, because a 212 px column cannot
-/// spend 16 px on each side and still fit "Performance".
-const RAIL_PAD_X: f32 = space::MD;
-const RAIL_PAD_Y: f32 = space::LG;
+/// The rail's own padding: icon rail, minimal chrome.
+const RAIL_PAD_X: f32 = space::SM;
+const RAIL_PAD_Y: f32 = space::MD;
 
 impl App {
     pub fn rail(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
-        self.brand_block(ui, p);
-        ui.add_space(space::LG);
+        self.brand_mark(ui, p);
+        ui.add_space(space::MD);
         self.navigation(ui, p);
-        self.rail_status(ui, p, st);
+        ui.add_space(space::MD);
+        self.health_dot(ui, p, st);
     }
 
-    fn brand_block(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::hover());
+    /// Accent block only. Wordmark moves to the header; the rail stays icons.
+    fn brand_mark(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.vertical_centered(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
             ui.painter().rect_filled(rect, radius::CONTROL, p.accent);
-            // A stylised "O" cut from the accent block. Drawn, not fonted: a glyph
-            // from a font that may not exist renders as tofu.
             ui.painter().circle_stroke(
                 rect.center(),
-                7.5,
+                8.0,
                 egui::Stroke::new(2.6_f32, p.shell),
             );
-            ui.add_space(space::XS);
-            ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new("OMENMON")
-                        .size(BODY + 1.5)
-                        .strong()
-                        .color(p.text)
-                        .family(theme::proportional()),
-                );
-                ui.label(
-                    egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                        .size(LABEL - 1.0)
-                        .color(p.faint())
-                        .family(theme::numeric()),
-                );
-            });
         });
     }
 
@@ -62,37 +45,32 @@ impl App {
         for page in Page::ALL {
             let active = self.ui.page == page;
             let (rect, resp) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), 34.0),
+                egui::vec2(ui.available_width(), 44.0),
                 egui::Sense::click(),
             );
             if ui.is_rect_visible(rect) {
                 let hovered = resp.hovered();
                 if active {
                     ui.painter().rect_filled(rect, radius::CONTROL, p.accent_soft);
-                    // A 3 px accent bar on the leading edge marks the active page
-                    // even when the fill is hard to distinguish at a glance.
                     let bar = egui::Rect::from_min_size(
-                        rect.min + egui::vec2(0.0, 6.0),
-                        egui::vec2(3.0, rect.height() - 12.0),
+                        rect.min + egui::vec2(0.0, 8.0),
+                        egui::vec2(3.0, rect.height() - 16.0),
                     );
                     ui.painter().rect_filled(bar, 1.5, p.accent);
                 } else if hovered {
                     ui.painter().rect_filled(rect, radius::CONTROL, p.tint(p.text, 12));
                 }
                 let icon_col = if active { p.accent } else { p.dim };
-                let icon_rect = egui::Rect::from_min_size(
-                    rect.min + egui::vec2(space::MD, 8.0),
-                    egui::vec2(18.0, 18.0),
-                );
-                w::glyph(ui, p, page.glyph(), icon_rect, icon_col);
+                let label = page.short();
                 ui.painter().text(
-                    rect.min + egui::vec2(40.0, rect.height() * 0.5),
-                    egui::Align2::LEFT_CENTER,
-                    page.title(),
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    label,
                     egui::FontId::new(BODY, theme::proportional()),
-                    if active { p.text } else { p.dim },
+                    icon_col,
                 );
             }
+            let resp = resp.on_hover_text(page.title());
             if resp.clicked() {
                 self.ui.page = page;
                 self.ui.save();
@@ -100,132 +78,94 @@ impl App {
         }
     }
 
-    /// Status pinned to the bottom of the rail, so it is on every page.
-    ///
-    /// Bottom-up layout, so the first thing added is the lowest. Each control is
-    /// a real toggle with a persisted value: a control that does nothing is on
-    /// the design rules.
-    fn rail_status(&mut self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            if let Some(e) = &st.last_error {
-                ui.label(
-                    egui::RichText::new(e)
-                        .size(LABEL - 1.0)
-                        .color(p.red)
-                        .family(theme::proportional()),
-                );
-            }
-            self.health_line(ui, p, st);
-            if let Some(t) = &self.tray_error {
-                ui.label(
-                    egui::RichText::new(format!("tray: {t}"))
-                        .size(LABEL - 2.0)
-                        .color(p.faint())
-                        .family(theme::proportional()),
-                );
-            }
-            ui.add_space(space::SM);
-            self.view_toggles(ui, p);
-        });
-    }
-
-    /// The one-line health indicator. Colour plus a word, never colour alone.
-    fn health_line(&self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
-        let (col, text) = if st.bios_ok {
-            (p.green, "telemetry OK")
-        } else if st.elevated {
-            (p.red, "no BIOS interface")
-        } else {
-            (p.amber, "read-only \u{00b7} not elevated")
-        };
-        ui.horizontal(|ui| {
+    /// One dot + one word, pinned to the rail bottom. Colour never stands alone.
+    fn health_dot(&self, ui: &mut egui::Ui, p: &Palette, st: &SharedState) {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+            let (col, text) = if st.bios_ok {
+                (p.green, "OK")
+            } else if st.elevated {
+                (p.red, "NO BIOS")
+            } else {
+                (p.amber, "RO")
+            };
             let (rect, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
             ui.painter().circle_filled(rect.center(), 3.5, col);
             ui.label(
                 egui::RichText::new(text)
-                    .size(LABEL - 1.0)
+                    .size(LABEL)
                     .color(p.dim)
                     .family(theme::proportional()),
             );
         });
     }
 
-    /// Theme, compact and close-behaviour, as small chips.
-    fn view_toggles(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        ui.horizontal(|ui| {
-            let theme_label = match self.ui.theme {
-                Theme::Dark => "Light theme",
-                Theme::Light => "Dark theme",
-            };
-            if rail_chip(ui, p, theme_label, false).clicked() {
-                self.ui.theme = match self.ui.theme {
-                    Theme::Dark => Theme::Light,
-                    Theme::Light => Theme::Dark,
-                };
-                self.ui.save();
-            }
-            if rail_chip(ui, p, "Compact", self.ui.compact)
-                .on_hover_text("hide the plots")
-                .clicked()
-            {
-                self.ui.compact = !self.ui.compact;
-                self.ui.save();
-            }
-            // Close-to-tray must be visible and reversible. It defaults to on so
-            // the sampler keeps running, but hiding that choice means a user who
-            // expects "close" to exit sees the window vanish and has to discover
-            // the tray icon to get it back.
-            if self.tray.is_some()
-                && rail_chip(
-                    ui,
-                    p,
-                    if self.ui.close_to_tray { "Close: tray" } else { "Close: exit" },
-                    self.ui.close_to_tray,
-                )
-                .on_hover_text(if self.ui.close_to_tray {
-                    "closing hides the window and keeps sampling; click to exit instead"
-                } else {
-                    "closing exits the app; click to hide to tray instead"
-                })
-                .clicked()
-            {
-                self.ui.close_to_tray = !self.ui.close_to_tray;
-                self.ui.save();
-            }
-        });
-    }
-
     /// Page title, subtitle, and the elevation offer.
     pub fn page_header(&mut self, ui: &mut egui::Ui, p: &Palette) {
         ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new(self.ui.page.title())
-                        .size(theme::TITLE)
-                        .strong()
-                        .color(p.text)
-                        .family(theme::proportional()),
-                );
-                ui.label(
-                    egui::RichText::new(self.ui.page.subtitle())
-                        .size(BODY)
-                        .color(p.dim)
-                        .family(theme::proportional()),
-                );
-            });
+            ui.label(
+                egui::RichText::new(self.ui.page.title())
+                    .size(HERO)
+                    .strong()
+                    .color(p.text)
+                    .family(theme::proportional()),
+            );
+            ui.label(
+                egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                    .size(LABEL)
+                    .color(p.faint())
+                    .family(theme::numeric()),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // The header keeps the elevation offer; the power card repeats it
-                // only where the missing token actually blocks the page, so the
-                // two never appear together.
                 if !self.sampler.state.lock().elevated
-                    && self.ui.page != Page::Performance
                     && w::primary_button(ui, p, "Restart as administrator", true).clicked()
                 {
                     self.relaunch_elevated(ui.ctx());
                 }
             });
         });
-        ui.add_space(space::LG);
+        self.global_write_status(ui, p);
+        ui.add_space(space::MD);
+    }
+
+    /// One global write status. Per-card spinners are gone; the header owns it.
+    fn global_write_status(&self, ui: &mut egui::Ui, p: &Palette) {
+        use crate::sampler::WriteOutcome as WO;
+        if let Some(started) = self.pending_since {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "writing… {} ms",
+                        started.elapsed().as_millis()
+                    ))
+                    .size(LABEL)
+                    .color(p.amber)
+                    .family(theme::numeric()),
+                );
+            });
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(120));
+            return;
+        }
+        let st = self.sampler.state.lock();
+        let Some(wr) = st.last_write.as_ref() else { return };
+        let fresh = wr.at.elapsed().as_millis() < crate::ui::components::FLASH_MS as u128;
+        let (mark, word, colour) = match wr.outcome {
+            WO::Verified => ("✓", "verified", p.green),
+            WO::Adjusted => ("≈", "adjusted", p.amber),
+            WO::Failed => ("✗", "refused", p.red),
+        };
+        let colour = if fresh { colour } else { colour.gamma_multiply(0.8) };
+        ui.label(
+            egui::RichText::new(format!("{mark} {word} · {}", wr.message))
+                .size(LABEL)
+                .color(colour)
+                .family(theme::proportional()),
+        );
+        if fresh {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(120));
+        }
     }
 
     /// Restart elevated, or report why not. Shared by the header and the power
@@ -304,25 +244,6 @@ impl App {
     }
 }
 
-/// A small chip button for the rail's view toggles.
-///
-/// Flat fill, no border: these are preferences, not actions, and a bordered
-/// button at the bottom of a 212 px rail competes with the navigation above it.
-fn rail_chip(ui: &mut egui::Ui, p: &Palette, text: &str, on: bool) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(text)
-                .size(LABEL - 1.0)
-                .color(if on { p.accent } else { p.dim })
-                .family(theme::proportional()),
-        )
-        .fill(p.tint(p.text, 8))
-        .stroke(egui::Stroke::NONE)
-        .rounding(radius::CONTROL)
-        .min_size(egui::vec2(0.0, 20.0)),
-    )
-}
-
 /// The rail frame. Kept here so `update()` reads as layout, not styling.
 pub fn rail_frame(p: &Palette) -> egui::Frame {
     egui::Frame::default()
@@ -334,5 +255,5 @@ pub fn rail_frame(p: &Palette) -> egui::Frame {
 pub fn page_frame(p: &Palette) -> egui::Frame {
     egui::Frame::default()
         .fill(p.bg)
-        .inner_margin(egui::Margin::symmetric(space::XL, space::LG))
+        .inner_margin(egui::Margin::symmetric(space::LG, space::MD))
 }
