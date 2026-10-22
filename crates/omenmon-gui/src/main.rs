@@ -227,7 +227,19 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        // Repaint floor. The 250 ms default keeps clocks and status text
+        // fresh without busy-looping; event-driven repaints (sampler ticks,
+        // tray messages, input) land sooner on their own. When the window
+        // is unfocused AND on battery, stretch the floor: egui otherwise
+        // costs a few percent CPU forever, which matters on a laptop.
+        let idle_floor = if ctx.input(|i| !i.viewport().focused.unwrap_or(true))
+            && self.sampler.state.lock().on_battery
+        {
+            2000
+        } else {
+            250
+        };
+        ctx.request_repaint_after(std::time::Duration::from_millis(idle_floor));
 
         self.handle_zoom_keys(ctx);
 

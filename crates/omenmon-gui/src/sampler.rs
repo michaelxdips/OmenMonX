@@ -146,6 +146,9 @@ pub struct SharedState {
     pub ec_ok: bool,
     pub target_fan_pct: u8,
     pub last_error: Option<String>,
+    /// True when the battery reports "discharging" — used by the UI to
+    /// stretch the repaint floor (laptop battery saver).
+    pub on_battery: bool,
 
     // ---- control state (verified channels only) ----
     /// The 0x2A limits block as the firmware reports it.
@@ -436,8 +439,11 @@ fn sampler_loop(
                             // that the battery vanished; keep the last real one.
                             let mut st = state.lock();
                             if st.battery.is_none() || !battery_is_empty(&b) {
-                                st.battery = Some(b);
+                                st.battery = Some(b.clone());
                             }
+                            // Discharging flag drives the UI's idle repaint
+                            // floor (battery saver). Cheap to publish here.
+                            st.on_battery = !b.ac_online;
                         }
                         tick += 1;
                         std::thread::sleep(Duration::from_millis(poll_ms.max(250)));
