@@ -721,8 +721,7 @@ mod tests {
 
     /// Design rule: no colour literal outside this file.
     ///
-    /// This is the verifier's rule from the design brief, enforced where it can
-    /// actually stop a regression. It scans the crate's own sources, so adding
+    /// Enforced here so it can actually stop a regression. It scans the crate's own sources, so adding
     /// `Color32::from_rgb(...)` to a page fails the build instead of quietly
     /// creating a twelfth grey.
     #[test]
