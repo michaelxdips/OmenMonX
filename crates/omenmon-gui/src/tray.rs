@@ -65,7 +65,11 @@ impl Tray {
         let quit_for_cb = quit_id.clone();
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
             if e.id == show_for_cb {
-                cmds.lock().push(TrayCommand::Show);
+                // Same reasoning as the click handler: the UI loop is stopped while
+                // hidden, so the window has to be shown from here.
+                if !show_window_direct() {
+                    cmds.lock().push(TrayCommand::Show);
+                }
             } else if e.id == quit_for_cb {
                 cmds.lock().push(TrayCommand::Quit);
             }
@@ -99,11 +103,84 @@ impl TrayIconEventBridge {
                 ..
             } = e
             {
-                cmds.lock().push(TrayCommand::Show);
+                // Show directly here rather than queueing for the UI thread. While the
+                // window is hidden the update loop is not running, so a queued command
+                // would never be drained - that was the bug that made the app
+                // unreachable after closing the window.
+                if !show_window_direct() {
+                    // If the direct call failed (unexpected), still queue it so a
+                    // future frame can retry.
+                    cmds.lock().push(TrayCommand::Show);
+                }
             }
         }));
     }
 }
+
+/// Bring the app window back without going through the egui update loop.
+///
+/// This cannot be done with `ViewportCommand::Visible(true)` alone. When the window
+/// is hidden, winit stops delivering redraw events, so `eframe::App::update` never
+/// runs again — which means a `Show` queued by the tray callback is never drained
+/// and the window stays hidden forever. That was a real bug, confirmed by driving
+/// the tray window proc directly: the callback fired, the command was queued, and
+/// the window still never came back.
+///
+/// `ShowWindow` is a direct Win32 call, so it works from the tray callback thread
+/// regardless of the UI loop state. Once the window is visible, winit resumes
+/// delivering redraws and the normal event path takes over again.
+///
+/// The window is found by process id plus the title `OmenMon`, which only the real
+/// window carries. Caching an HWND is not an option: the tray is created before the
+/// first frame, so no handle exists yet at that point.
+pub fn show_window_direct() -> bool {
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+        SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+
+    /// Carries both the target pid and an out-flag through `EnumWindows`'s single
+    /// `lparam`, because the callback has no other way to report a result.
+    struct Ctx {
+        pid: u32,
+        found: bool,
+    }
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut Ctx);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != ctx.pid {
+            return BOOL(1);
+        }
+        let mut title = [0u16; 256];
+        let len = GetWindowTextW(hwnd, &mut title);
+        if len == 0 || String::from_utf16_lossy(&title[..len as usize]) != "OmenMon" {
+            return BOOL(1);
+        }
+        // SW_SHOW first: the window was hidden, not minimised, so SW_RESTORE alone
+        // can leave it hidden on some drivers.
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
+        ctx.found = IsWindowVisible(hwnd).as_bool();
+        BOOL(0)
+    }
+
+    let mut ctx = Ctx {
+        pid: std::process::id(),
+        found: false,
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_proc),
+            LPARAM(&mut ctx as *mut Ctx as isize),
+        );
+    }
+    ctx.found
+}
+
 
 /// 16x16 amber arc on graphite, drawn as an anti-aliased ring segment.
 ///

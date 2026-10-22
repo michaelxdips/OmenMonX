@@ -465,6 +465,37 @@ impl App {
                     self.ui.compact = !self.ui.compact;
                     self.ui.save();
                 }
+                // Close-to-tray must be visible and reversible. It defaults to on
+                // so the sampler keeps running, but hiding that choice means a user
+                // who expects "close" to exit sees the window vanish and has to
+                // discover the tray icon to get it back.
+                if self.tray.is_some()
+                    && ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(if self.ui.close_to_tray {
+                                    "Close: tray"
+                                } else {
+                                    "Close: exit"
+                                })
+                                .size(10.0)
+                                .color(if self.ui.close_to_tray { p.accent } else { p.dim })
+                                .family(theme::proportional()),
+                            )
+                            .fill(p.tint(p.text, 8))
+                            .stroke(egui::Stroke::NONE)
+                            .rounding(5.0),
+                        )
+                        .on_hover_text(if self.ui.close_to_tray {
+                            "closing hides the window and keeps sampling; click to exit instead"
+                        } else {
+                            "closing exits the app; click to hide to tray instead"
+                        })
+                        .clicked()
+                {
+                    self.ui.close_to_tray = !self.ui.close_to_tray;
+                    self.ui.save();
+                }
             });
         });
     }
